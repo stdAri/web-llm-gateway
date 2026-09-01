@@ -1,0 +1,15 @@
+---
+status: accepted
+---
+
+# Decouple Provider Adapters from a Pluggable Automation Driver
+
+Web Provider Adapters (per-site model discovery, prompt submission, stream parsing, tool envelope) are written against one abstract Automation Driver interface, not against a specific execution mechanism. The first implementation is a Bridge Driver: a browser extension or userscript running inside the Developer User's own already-authenticated browser, chosen over Gateway-launched Playwright/CDP automation because it avoids the automation-environment fingerprints (`navigator.webdriver`, CDP protocol artifacts, headless signals) that anti-bot systems specifically target, and because it matches Zotero GPT Connector's long-running precedent. A Managed Driver backed by Playwright/CDP remains possible later without rewriting any Provider Adapter, since both drivers satisfy the same interface. Neither driver eliminates behavioral detection risk from request volume, frequency, or non-human timing patterns; that risk must be addressed independently through rate and concurrency controls.
+
+The Bridge is delivered as a userscript first, verified against Doubao, DeepSeek, and ChatGPT, and migrated to a browser extension once the interface has stabilized and the extension's added lifecycle and permission complexity is justified by what the userscript could not do. Provider Adapter logic must not bind to userscript-manager APIs, so that migration does not rewrite adapters.
+
+The Bridge authenticates to the Gateway Node with a Bridge Pairing Token issued separately from the Gateway API Key, reissuable through a pairing command. Loopback isolation alone is insufficient because any page in the browser can reach `127.0.0.1`, and reusing the Gateway API Key would mean a token exposed inside a Web Product page also granted Agent Client access to the Gateway.
+
+**Refinement.** Provider Adapters execute inside the page rather than calling the driver remotely: site parsing needs page-context access that cannot be replicated across a process boundary — Doubao's structured React state is only readable in-page — shipping every raw network frame and DOM mutation across the bridge would be needlessly chatty for long streamed answers, and a userscript can auto-update far faster than a daemon release, which matters because site drift is the highest-frequency change this project will face. Running location is not authoring location: Provider Adapter source lives in the repository as ordinary modules, unit-tested in CI against recorded frames, and is bundled into the Bridge artifact at build time, so a future Managed Driver can inject the same modules through `page.evaluate()` instead of reimplementing them. The Automation Driver contract is therefore the host that injects adapters and transports canonical events, not an RPC surface adapters call.
+
+Security consequence: parsing moves into an untrusted page, so validation must not. Per ADR-0012 the Gateway Node revalidates every tool envelope — tool allowlist, argument schema, `call_id`, turn nonce — on the daemon side, and never treats Bridge-supplied structure as trusted.

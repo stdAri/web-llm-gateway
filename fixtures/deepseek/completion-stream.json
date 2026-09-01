@@ -1,0 +1,28 @@
+{
+  "site": "chat.deepseek.com",
+  "capturedAt": "2026-09-02T00:00:00.000Z",
+  "redacted": true,
+  "note": "Redacted SSE payloads captured from DeepSeek's completion-suffixed streaming endpoint. Reasoning content is truncated and randomized; answer content is synthetic. Recorded before adapter shipping, per docs/research/doubao-deepseek-behavior.md.",
+  "frames": [
+    {
+      "label": "reasoning-delta",
+      "payload": { "reasoning_content": "用户希望我回答一个简单问题。让我先想一下……" }
+    },
+    {
+      "label": "answer-delta-1",
+      "payload": { "choices": [{ "delta": { "content": "你好，世界。" }, "index": 0 }] }
+    },
+    {
+      "label": "answer-delta-2",
+      "payload": { "choices": [{ "delta": { "content": "这是一个测试回答。" }, "index": 0 }] }
+    },
+    {
+      "label": "finish-reason",
+      "payload": { "choices": [{ "delta": {}, "index": 0, "finish_reason": "stop" }] }
+    },
+    {
+      "label": "reasoning-inside-delta",
+      "payload": { "choices": [{ "delta": { "reasoning_content": "思考过程在 delta 内。" }, "index": 0 }] }
+    }
+  ]
+}
