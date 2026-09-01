@@ -2,3 +2,9 @@ node_modules/
 dist/
 .gateway/
 *.log
+
+# Agent tooling — not project source
+.agents/
+agent/
+.claude/
+skills-lock.json
