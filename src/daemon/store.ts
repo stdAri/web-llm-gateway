@@ -27,11 +27,18 @@ export class GatewayStore {
   loadOrCreate(): GatewayState {
     if (existsSync(this.file)) {
       const raw = readFileSync(this.file, "utf8");
-      return JSON.parse(raw) as GatewayState;
+      const state = JSON.parse(raw) as GatewayState;
+      // Backfill the Gateway API Key for state files created before ticket 02.
+      if (!state.gatewayApiKey) {
+        state.gatewayApiKey = this.newGatewayApiKey();
+        writeFileSync(this.file, JSON.stringify(state, null, 2), { mode: 0o600 });
+      }
+      return state;
     }
     mkdirSync(this.dir, { recursive: true });
     const state: GatewayState = {
       pairingToken: this.newToken(),
+      gatewayApiKey: this.newGatewayApiKey(),
       createdAt: new Date().toISOString(),
     };
     writeFileSync(this.file, JSON.stringify(state, null, 2), { mode: 0o600 });
@@ -47,6 +54,10 @@ export class GatewayStore {
 
   private newToken(): string {
     return `bp_${randomBytes(24).toString("hex")}`;
+  }
+
+  private newGatewayApiKey(): string {
+    return `gw_${randomBytes(24).toString("hex")}`;
   }
 }
 

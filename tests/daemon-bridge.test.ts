@@ -5,6 +5,7 @@ import { BRIDGE_PROTOCOL_VERSION } from "../src/shared/bridge-protocol";
 import type { ProviderRegistration } from "../src/shared/canonical";
 
 const TOKEN = "bp_testtoken123";
+const GATEWAY_KEY = "gw_testkey123";
 const DEEPSEEK_PROVIDER = "deepseek";
 
 function registration(provider = DEEPSEEK_PROVIDER, protocolVersion = BRIDGE_PROTOCOL_VERSION): ProviderRegistration {
@@ -46,7 +47,7 @@ function openBridge(wsUrl: string, token: string, reg: ProviderRegistration) {
 describe("BridgeHub pairing", () => {
   test("rejects a connection with an invalid pairing token", async () => {
     const hub = new BridgeHub(TOKEN);
-    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 1000 });
+    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 1000, gatewayApiKey: GATEWAY_KEY });
     await server.start();
     try {
       const port = server.port!;
@@ -68,7 +69,7 @@ describe("BridgeHub pairing", () => {
 describe("BridgeHub provider registration (no hardcoded list)", () => {
   test("provider is learned from the Bridge announcement", async () => {
     const hub = new BridgeHub(TOKEN);
-    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 1000 });
+    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 1000, gatewayApiKey: GATEWAY_KEY });
     await server.start();
     try {
       const port = server.port!;
@@ -85,7 +86,7 @@ describe("BridgeHub provider registration (no hardcoded list)", () => {
 describe("end-to-end text turn", () => {
   test("a prompt routed to a registered provider returns the real answer", async () => {
     const hub = new BridgeHub(TOKEN);
-    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 5000 });
+    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 5000, gatewayApiKey: GATEWAY_KEY });
     await server.start();
     try {
       const port = server.port!;
@@ -94,7 +95,7 @@ describe("end-to-end text turn", () => {
 
       const answerPromise = fetch(`http://127.0.0.1:${port}/v1/turn`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", authorization: `Bearer ${GATEWAY_KEY}` },
         body: JSON.stringify({ provider: DEEPSEEK_PROVIDER, prompt: "你好" }),
       }).then((r) => r.json());
 
@@ -120,14 +121,14 @@ describe("end-to-end text turn", () => {
 
   test("fail-closed when no live tab is registered", async () => {
     const hub = new BridgeHub(TOKEN);
-    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 1000 });
+    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 1000, gatewayApiKey: GATEWAY_KEY });
     await server.start();
     try {
       const port = server.port!;
       await openBridge(`ws://127.0.0.1:${port}/bridge`, TOKEN, registration());
       const res = await fetch(`http://127.0.0.1:${port}/v1/turn`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", authorization: `Bearer ${GATEWAY_KEY}` },
         body: JSON.stringify({ provider: DEEPSEEK_PROVIDER, prompt: "hi" }),
       }).then((r) => r.json());
       expect((res as { error: { code: string } }).error.code).toBe("provider_unavailable");
@@ -140,7 +141,7 @@ describe("end-to-end text turn", () => {
 describe("loopback binding", () => {
   test("server binds to 127.0.0.1 only", async () => {
     const hub = new BridgeHub(TOKEN);
-    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 1000 });
+    const server = new GatewayHTTPServer({ hub, port: 0, turnTimeoutMs: 1000, gatewayApiKey: GATEWAY_KEY });
     await server.start();
     try {
       expect(server.hostname).toBe("127.0.0.1");

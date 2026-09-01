@@ -1,7 +1,7 @@
 /**
  * Gateway Node CLI entry point.
  *
- * Two commands for ticket 01:
+ * Commands:
  * - `serve` — start the daemon (loopback HTTP + WebSocket for Bridge)
  * - `pair` — reissue the Bridge Pairing Token (print it, don't start the daemon)
  */
@@ -26,10 +26,15 @@ switch (command) {
       hub,
       port: DEFAULT_PORT,
       turnTimeoutMs: TURN_TIMEOUT_MS,
+      gatewayApiKey: state.gatewayApiKey!,
     });
     const port = await server.start();
     console.log(`Gateway Node listening on http://127.0.0.1:${port}`);
     console.log(`Bridge Pairing Token: ${state.pairingToken}`);
+    console.log("");
+    console.log("Claude Code configuration:");
+    console.log(`  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}`);
+    console.log(`  export ANTHROPIC_AUTH_TOKEN=${state.gatewayApiKey}`);
     process.on("SIGINT", () => {
       server.stop();
       process.exit(0);

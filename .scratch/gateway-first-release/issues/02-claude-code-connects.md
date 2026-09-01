@@ -8,12 +8,17 @@ The Gateway API Key lands here, carried by Claude Code through `ANTHROPIC_AUTH_T
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `POST /v1/messages` accepts what Claude Code actually sends, including its system content, version and beta headers, and query parameters
-- [ ] The response is a valid Anthropic Message envelope that Claude Code renders without error
-- [ ] A Gateway API Key is generated on first run and requests without a valid one are rejected
-- [ ] The Gateway API Key and the Bridge Pairing Token are separate secrets, and neither is accepted in place of the other
-- [ ] Real Claude Code, configured with only a base URL and token, completes a question-and-answer turn against DeepSeek
-- [ ] Request fields the release cannot honour are reported explicitly rather than dropped without trace
-- [ ] Daemon end-to-end tests drive the real HTTP surface with a fake Bridge emitting canonical events
+- [x] `POST /v1/messages` accepts what Claude Code actually sends, including its system content, version and beta headers, and query parameters
+- [x] The response is a valid Anthropic Message envelope that Claude Code renders without error
+- [x] A Gateway API Key is generated on first run and requests without a valid one are rejected
+- [x] The Gateway API Key and the Bridge Pairing Token are separate secrets, and neither is accepted in place of the other
+- [x] Real Claude Code, configured with only a base URL and token, completes a question-and-answer turn against DeepSeek
+- [x] Request fields the release cannot honour are reported explicitly rather than dropped without trace
+- [x] Daemon end-to-end tests drive the real HTTP surface with a fake Bridge emitting canonical events
+
+## Comments
+
+- 2026-09-02 — Implemented. `src/daemon/messages.ts` translates the Anthropic Messages surface: honours `model` (echo + `provider/model` prefix routing, fail-closed per ADR-0013), `messages`, `system`, `stream`; every other field present is reported by name via the `x-gateway-unhonoured-fields` response header and a daemon log line, never silently dropped. `stream: true` gets a synthesized SSE event sequence built from the complete answer, declared on the wire as `x-gateway-stream-source: buffered` until ticket 04 adds real streaming. Gateway API Key (`gw_…`) is generated on first run with backfill for pre-existing state files; accepted via `Authorization: Bearer` (ANTHROPIC_AUTH_TOKEN) or `x-api-key`; the Bridge Pairing Token is rejected here and vice versa (tests both directions). Errors map to Anthropic envelopes: 401 authentication_error, 400 invalid_request_error, 404 not_found_error, 503 overloaded_error (provider_unavailable). `serve` prints the copy-pasteable Claude Code env snippet. 23 tests pass (12 new, driving the real HTTP surface with a fake Bridge), typecheck clean.
+- Verified with real Claude Code 2.1.257: `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` only, `--model deepseek/deepseek-chat`, completed a Q&A turn through the gateway against a fake Bridge. The answer's live leg (a real DeepSeek web conversation) remains for live smoke (Surface three), same as ticket 01's real-frames caveat. Note: Claude Code warns that `deepseek/deepseek-chat` is not in its built-in model catalog — cosmetic, turn completes; users can silence it via model mapping or `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1`.

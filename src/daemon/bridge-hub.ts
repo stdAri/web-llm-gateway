@@ -19,7 +19,7 @@ export interface RegisteredTab {
 }
 
 interface PendingTurn {
-  resolve: (text: string) => void;
+  resolve: (result: { text: string; streamSource: string }) => void;
   reject: (err: Error) => void;
 }
 
@@ -66,7 +66,11 @@ export class BridgeHub {
   }
 
   /** Submit a text prompt to a provider and wait for the complete answer. */
-  submitTurn(provider: string, prompt: string, timeoutMs: number): Promise<string> {
+  submitTurn(
+    provider: string,
+    prompt: string,
+    timeoutMs: number,
+  ): Promise<{ text: string; streamSource: string }> {
     const tab = this.pickTab(provider);
     if (!tab) {
       return Promise.reject(
@@ -76,16 +80,16 @@ export class BridgeHub {
       );
     }
     const turnId = `t_${Math.random().toString(36).slice(2, 12)}`;
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<{ text: string; streamSource: string }>((resolve, reject) => {
       let byProvider = this.pendingTurns.get(provider);
       if (!byProvider) {
         byProvider = new Map();
         this.pendingTurns.set(provider, byProvider);
       }
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const safeResolve = (text: string) => {
+      const safeResolve = (result: { text: string; streamSource: string }) => {
         clearTimeout(timer);
-        resolve(text);
+        resolve(result);
       };
       const safeReject = (err: Error) => {
         clearTimeout(timer);
@@ -217,7 +221,7 @@ export class BridgeHub {
         if (msg.error) {
           pending.reject(Object.assign(new Error(msg.error.message), { code: msg.error.code }));
         } else {
-          pending.resolve(msg.text);
+          pending.resolve({ text: msg.text, streamSource: msg.streamSource });
         }
         break;
       }

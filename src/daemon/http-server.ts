@@ -1,25 +1,38 @@
 /**
- * The Gateway Node's HTTP surface for ticket 01.
+ * The Gateway Node's HTTP surface.
  *
- * Exposes a single endpoint `/v1/turn` that accepts a text prompt, routes it
- * through the BridgeHub to a registered provider, and returns the complete
- * answer.
+ * Two client endpoints:
+ * - `/v1/turn` (ticket 01) — a text prompt routed through the BridgeHub to a
+ *   registered provider, answer returned complete. Kept as a scaffold surface.
+ * - `/v1/messages` (ticket 02) — the Anthropic Messages protocol Claude Code
+ *   speaks, translated by ./messages.ts.
+ *
+ * Both require the Gateway API Key (Authorization: Bearer or x-api-key),
+ * generated on first run and stored by ./store.ts. The Bridge's WebSocket
+ * authenticates separately with the Bridge Pairing Token; neither secret is
+ * accepted in place of the other (ADR-0007).
  *
  * Loopback isolation is enforced at the socket level: the server binds to
  * 127.0.0.1 only, so connections from other interfaces are refused by the OS
  * before any request is handled, per CONTEXT.md "Gateway Node".
- *
- * Ticket 01 scope: no model selection, no streaming, no tool loop, no queueing.
- * The caller is `curl`, not an Agent Client (ticket 02).
  */
 
 import { type Server } from "bun";
 import { BridgeHub, type BridgeSocketData } from "./bridge-hub";
+import {
+  anthropicError,
+  mapCanonicalError,
+  messageEnvelope,
+  MessagesRequestError,
+  parseMessagesRequest,
+  synthesizedEventStream,
+} from "./messages";
 
 export interface ServerOptions {
   hub: BridgeHub;
   port: number;
   turnTimeoutMs: number;
+  gatewayApiKey: string;
 }
 
 export class GatewayHTTPServer {
@@ -36,7 +49,7 @@ export class GatewayHTTPServer {
   }
 
   async start(): Promise<number> {
-    const { hub, port, turnTimeoutMs } = this.opts;
+    const { hub, port, turnTimeoutMs, gatewayApiKey } = this.opts;
     return new Promise<number>((resolve) => {
       const server = Bun.serve({
         hostname: "127.0.0.1",
@@ -45,7 +58,8 @@ export class GatewayHTTPServer {
         fetch: (req) => {
           const url = new URL(req.url);
 
-          // WebSocket upgrade for the Bridge
+          // WebSocket upgrade for the Bridge (pairing-token auth inside the
+          // bridge protocol, not the Gateway API Key)
           if (url.pathname === "/bridge" && req.method === "GET") {
             const upgrade = server.upgrade(req, {
               data: { tokenPresented: false, provider: undefined },
@@ -59,8 +73,23 @@ export class GatewayHTTPServer {
             return Response.json({ ok: true, providers: hub.listProviders() });
           }
 
+          // POST /v1/messages — Anthropic Messages (Claude Code). Query
+          // parameters (?beta=true) are accepted; routing matches path only.
+          if (url.pathname === "/v1/messages" && req.method === "POST") {
+            if (!hasGatewayKey(req, gatewayApiKey)) {
+              return anthropicError(401, "authentication_error", "missing or invalid Gateway API Key");
+            }
+            return handleMessages(req, hub, turnTimeoutMs);
+          }
+
           // POST /v1/turn — submit a text prompt
           if (url.pathname === "/v1/turn" && req.method === "POST") {
+            if (!hasGatewayKey(req, gatewayApiKey)) {
+              return Response.json(
+                { error: { code: "unauthorized", message: "missing or invalid Gateway API Key" } },
+                { status: 401 },
+              );
+            }
             return handleTurn(req, hub, turnTimeoutMs);
           }
 
@@ -77,6 +106,84 @@ export class GatewayHTTPServer {
   }
 }
 
+/** The Gateway API Key arrives as `Authorization: Bearer` (Claude Code's
+ * ANTHROPIC_AUTH_TOKEN) or `x-api-key`. Only an exact match on the Gateway
+ * API Key is accepted — the Bridge Pairing Token does not work here. */
+function hasGatewayKey(req: Request, gatewayApiKey: string): boolean {
+  const bearer = req.headers.get("authorization");
+  const presented = bearer?.startsWith("Bearer ")
+    ? bearer.slice("Bearer ".length)
+    : req.headers.get("x-api-key");
+  return presented === gatewayApiKey;
+}
+
+async function handleMessages(
+  req: Request,
+  hub: BridgeHub,
+  turnTimeoutMs: number,
+): Promise<Response> {
+  let parsed;
+  try {
+    parsed = parseMessagesRequest(await req.json());
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "request body must be valid JSON";
+    const { status, type } = mapCanonicalError("invalid_request");
+    return anthropicError(status, type, message);
+  }
+
+  // Provider routing: an explicit `provider/model` prefix wins; with exactly
+  // one registered provider the choice is unambiguous. Anything else fails
+  // closed, naming what is available (ADR-0013).
+  const available = hub.listProviders().map((p) => p.provider);
+  const provider = parsed.providerPrefix ?? (available.length === 1 ? available[0] : undefined);
+  if (!provider || !available.includes(provider)) {
+    const { status, type } = mapCanonicalError("model_unavailable");
+    return anthropicError(
+      status,
+      type,
+      `cannot route model "${parsed.requestedModel}": qualify it as <provider>/<model>. ` +
+        `available providers: ${available.join(", ") || "(none — pair a Bridge and open a Web Product tab)"}`,
+    );
+  }
+
+  const headers: Record<string, string> = { "x-gateway-provider": provider };
+  if (parsed.unhonouredFields.length > 0) {
+    headers["x-gateway-unhonoured-fields"] = parsed.unhonouredFields.join(",");
+    console.warn(`[messages] unhonoured request fields: ${parsed.unhonouredFields.join(", ")}`);
+  }
+
+  try {
+    const result = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs);
+    if (parsed.stream) {
+      // Synthesized from a complete answer, not native streaming (ticket 04
+      // replaces this) — the provenance header must say so.
+      headers["content-type"] = "text/event-stream; charset=utf-8";
+      headers["cache-control"] = "no-cache";
+      headers["x-gateway-stream-source"] = "buffered";
+      return new Response(
+        synthesizedEventStream({
+          requestedModel: parsed.requestedModel,
+          answer: result.text,
+          prompt: parsed.prompt,
+        }),
+        { headers },
+      );
+    }
+    return Response.json(
+      messageEnvelope({
+        requestedModel: parsed.requestedModel,
+        answer: result.text,
+        prompt: parsed.prompt,
+      }),
+      { headers },
+    );
+  } catch (err: unknown) {
+    const code = (err as Error & { code?: string }).code ?? "internal_error";
+    const { status, type } = mapCanonicalError(code);
+    return anthropicError(status, type, (err as Error).message ?? "unknown error");
+  }
+}
+
 async function handleTurn(
   req: Request,
   hub: BridgeHub,
@@ -89,8 +196,8 @@ async function handleTurn(
     if (!prompt || typeof prompt !== "string") {
       return Response.json({ error: { code: "invalid_request", message: "missing or invalid 'prompt' field" } }, { status: 400 });
     }
-    const text = await hub.submitTurn(provider, prompt, turnTimeoutMs);
-    return Response.json({ provider, text });
+    const result = await hub.submitTurn(provider, prompt, turnTimeoutMs);
+    return Response.json({ provider, text: result.text, streamSource: result.streamSource });
   } catch (err: unknown) {
     const code = (err as Error & { code?: string }).code ?? "internal_error";
     const message = (err as Error).message ?? "unknown error";
