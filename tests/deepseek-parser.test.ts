@@ -107,6 +107,43 @@ describe("createDeepSeekAssembler frame shapes", () => {
   });
 });
 
+describe("incremental deltas (ticket 04)", () => {
+  test("every frame's delta concatenates to the assembled answer", () => {
+    const asm = createDeepSeekAssembler();
+    let answerStream = "";
+    let reasoningStream = "";
+    for (const f of fixture.frames) {
+      const d = asm.push(f);
+      if (d.answer) answerStream += d.answer;
+      if (d.reasoning) reasoningStream += d.reasoning;
+    }
+    const { text, reasoning } = asm.result();
+    expect(answerStream).toBe(text);
+    expect(reasoningStream).toBe(reasoning);
+    expect(answerStream).toBe(fixture.expected.text);
+  });
+
+  test("per-frame deltas are attributed to the right bucket", () => {
+    const asm = createDeepSeekAssembler();
+    const thinkFrame = { v: { response: { fragments: [{ type: "THINK", content: "想" }] } } };
+    expect(asm.push(thinkFrame)).toEqual({ reasoning: "想" });
+    expect(asm.push({ v: "一下" })).toEqual({ reasoning: "一下" });
+    const responseFrame = { p: "response/fragments", o: "APPEND", v: [{ type: "RESPONSE", content: "答" }] };
+    expect(asm.push(responseFrame)).toEqual({ answer: "答" });
+    expect(asm.push({ v: "案" })).toEqual({ answer: "案" });
+  });
+
+  test("contentless and truncated frames yield no delta and corrupt nothing", () => {
+    const asm = createDeepSeekAssembler();
+    asm.push({ v: { response: { fragments: [{ type: "RESPONSE", content: "你" }] } } });
+    expect(asm.push({ p: "response/fragments/-1/elapsed_secs", o: "SET", v: 0.8 })).toEqual({});
+    expect(asm.push(null)).toEqual({});
+    expect(asm.push({})).toEqual({});
+    expect(asm.push({ v: "好" })).toEqual({});
+    expect(asm.result()).toEqual({ text: "你", reasoning: "" });
+  });
+});
+
 // Ticket 03: tool envelopes are extracted from surrounding prose, never
 // whole-message matched (the experiment showed prose on every DeepSeek turn).
 import { extractToolEnvelopes } from "../src/bridge/deepseek-adapter";

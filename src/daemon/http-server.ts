@@ -26,6 +26,7 @@ import { ToolLoop } from "./tool-loop";
 import {
   anthropicError,
   executeMessagesTurn,
+  executeMessagesTurnStreaming,
   mapCanonicalError,
   messageEnvelope,
   parseMessagesRequest,
@@ -190,17 +191,45 @@ async function handleMessages(
     );
   }
 
-  const headers: Record<string, string> = { "x-gateway-provider": provider };
+  const headers: Record<string, string> = {
+    "x-gateway-provider": provider,
+    // Web products report no accounting; every usage figure is a
+    // length-based estimate and must be flagged as such (ticket 04).
+    "x-gateway-usage": "estimated",
+  };
   if (parsed.unhonouredFields.length > 0) {
     headers["x-gateway-unhonoured-fields"] = parsed.unhonouredFields.join(",");
     console.warn(`[messages] unhonoured request fields: ${parsed.unhonouredFields.join(", ")}`);
   }
 
+  // Real incremental streaming applies to plain text turns. Tool-loop turns
+  // stay buffered: calls must be validated atomically before anything reaches
+  // the client, so there is nothing honest to stream mid-turn.
+  if (parsed.stream && !parsed.tools && !parsed.toolResults) {
+    try {
+      const readiness = await executeMessagesTurnStreaming(hub, provider, parsed, turnTimeoutMs);
+      headers["content-type"] = "text/event-stream; charset=utf-8";
+      headers["cache-control"] = "no-cache";
+      headers["x-gateway-stream-source"] = readiness.provenance;
+      if (readiness.provenance === "buffered") {
+        return new Response(
+          synthesizedEventStream({ requestedModel: parsed.requestedModel, prompt: parsed.prompt, reply: readiness.reply }),
+          { headers },
+        );
+      }
+      return new Response(readiness.body, { headers });
+    } catch (err: unknown) {
+      const code = (err as Error & { code?: string }).code ?? "internal_error";
+      const { status, type } = mapCanonicalError(code);
+      return anthropicError(status, type, (err as Error).message ?? "unknown error");
+    }
+  }
+
   try {
     const reply = await executeMessagesTurn(hub, toolLoop, provider, parsed, turnTimeoutMs);
     if (parsed.stream) {
-      // Synthesized from a complete answer, not native streaming (ticket 04
-      // replaces this) — the provenance header must say so.
+      // Tool turns: synthesized from a complete, validated answer — the
+      // provenance header must say so.
       headers["content-type"] = "text/event-stream; charset=utf-8";
       headers["cache-control"] = "no-cache";
       headers["x-gateway-stream-source"] = "buffered";
@@ -236,6 +265,7 @@ async function handleTurn(
     return Response.json({
       provider,
       text: result.text,
+      reasoning: result.reasoning,
       streamSource: result.streamSource,
       diagnostics: result.diagnostics,
     });

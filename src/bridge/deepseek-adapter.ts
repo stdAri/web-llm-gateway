@@ -49,9 +49,16 @@ export const DEEPSEEK = {
  */
 export type DeepSeekBucket = "answer" | "reasoning" | "none";
 
+/** The content one frame appended, so callers can stream incrementally
+ * instead of polling the accumulated result. */
+export interface DeepSeekDelta {
+  answer?: string;
+  reasoning?: string;
+}
+
 export interface DeepSeekAssembler {
-  /** Feed one decoded SSE payload, in arrival order. */
-  push(payload: unknown): void;
+  /** Feed one decoded SSE payload, in arrival order; returns what it added. */
+  push(payload: unknown): DeepSeekDelta;
   /** True once the stream has declared the response finished. */
   readonly done: boolean;
   result(): { text: string; reasoning: string };
@@ -64,8 +71,8 @@ export function createDeepSeekAssembler(): DeepSeekAssembler {
   let done = false;
 
   return {
-    push(payload: unknown) {
-      if (payload === null || typeof payload !== "object") return;
+    push(payload: unknown): DeepSeekDelta {
+      if (payload === null || typeof payload !== "object") return {};
       const frame = payload as Record<string, unknown>;
       if (isFinished(frame)) done = true;
 
@@ -79,10 +86,17 @@ export function createDeepSeekAssembler(): DeepSeekAssembler {
         // Clearing the bucket keeps them from letting a later bare `v` attach
         // itself to a fragment that has already ended.
         bucket = "none";
-        return;
+        return {};
       }
-      if (bucket === "answer") text += content;
-      else if (bucket === "reasoning") reasoning += content;
+      if (bucket === "answer") {
+        text += content;
+        return { answer: content };
+      }
+      if (bucket === "reasoning") {
+        reasoning += content;
+        return { reasoning: content };
+      }
+      return {};
     },
     get done() {
       return done;

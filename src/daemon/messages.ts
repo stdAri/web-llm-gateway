@@ -12,10 +12,15 @@
  *   other value behaves as "auto" — a web model cannot be forced). Everything
  *   else present on the request is reported explicitly (response header +
  *   daemon log), never silently dropped.
- * - `stream: true` is answered with a *synthesized* SSE stream built from the
- *   complete answer, because the Bridge path still returns answers whole.
- *   Provenance is declared on the wire as `x-gateway-stream-source: buffered`;
- *   real incremental streaming replaces this in ticket 04.
+ * - `stream: true` on a plain text turn is answered with a *real* incremental
+ *   SSE stream fed by Bridge `turn.delta` events (ticket 04), provenance
+ *   `x-gateway-stream-source: network`. Turns that never produce a delta
+ *   (older Bridge, interception missed the stream) and tool-loop turns (calls
+ *   must be validated atomically) fall back to a synthesized stream from the
+ *   complete answer, declared `x-gateway-stream-source: buffered`. Buffered
+ *   replay is never presented as native streaming.
+ * - Usage figures are rough length-based estimates; responses carry
+ *   `x-gateway-usage: estimated`.
  * - Tools are prompt-emulated per ADR-0012: definitions are encoded into the
  *   envelope setup prompt (tool-loop.ts), the model's envelopes come back as
  *   parsed calls, and the daemon validates allowlist, schema, and per-turn
@@ -30,7 +35,7 @@
 import { randomUUID } from "node:crypto";
 import type { CanonicalErrorCode, StreamSource } from "../shared/canonical";
 import { ToolLoop, ToolProtocolError, type ToolSpec, type ValidatedCall } from "./tool-loop";
-import type { BridgeHub } from "./bridge-hub";
+import type { BridgeHub, TurnDelta, TurnOutcome } from "./bridge-hub";
 
 /** Request fields this adapter actually honours. */
 const HONOURED_FIELDS = new Set(["model", "messages", "system", "stream", "tools", "tool_choice"]);
@@ -247,6 +252,7 @@ function estimateTokens(text: string): number {
 
 export type ResponseContentBlock =
   | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string }
   | { type: "tool_use"; id: string; name: string; input: unknown };
 
 export interface TurnReply {
@@ -254,6 +260,19 @@ export interface TurnReply {
   stopReason: "end_turn" | "tool_use";
   /** Text the usage estimate is computed from. */
   outputText: string;
+}
+
+/** A plain-text outcome as a reply: reasoning becomes its own thinking block
+ * so clients render it the way they render native thinking. */
+function plainReply(outcome: TurnOutcome): TurnReply {
+  const content: ResponseContentBlock[] = [];
+  if (outcome.reasoning) content.push({ type: "thinking", thinking: outcome.reasoning });
+  content.push({ type: "text", text: outcome.text });
+  return {
+    content,
+    stopReason: "end_turn",
+    outputText: (outcome.reasoning ?? "") + outcome.text,
+  };
 }
 
 /**
@@ -295,13 +314,9 @@ export async function executeMessagesTurn(
     conv = toolLoop.begin(provider, parsed.tools);
     prompt = toolLoop.buildSetupPrompt(conv, parsed.prompt);
   } else {
-    // No tools: the ticket 01/02 path, untouched.
+    // No tools: the ticket 01/02 path, with reasoning split out (ticket 04).
     const outcome = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs);
-    return {
-      content: [{ type: "text", text: outcome.text }],
-      stopReason: "end_turn",
-      outputText: outcome.text,
-    };
+    return plainReply(outcome);
   }
 
   for (;;) {
@@ -341,6 +356,149 @@ export async function executeMessagesTurn(
       assessment.prose + assessment.calls.map((c) => JSON.stringify(c.input)).join("");
     return { content, stopReason: "tool_use", outputText };
   }
+}
+
+/**
+ * Real incremental streaming for plain text turns (ticket 04).
+ *
+ * The Bridge relays each DeepSeek frame's freshly appended content as a
+ * `turn.delta`; here those deltas become Anthropic SSE events in canonical
+ * order: message_start, a thinking block while reasoning flows, then a text
+ * block, message_delta with the stop reason, message_stop. Reasoning is
+ * emitted separately from answer content so the client renders thinking the
+ * way it normally does.
+ *
+ * Provenance honesty is structural: the returned promise only resolves to
+ * `network` once the first real delta has arrived — a turn whose Bridge never
+ * streams (older build, interception missed) resolves to `buffered` with the
+ * complete reply, and the caller replays it through synthesizedEventStream
+ * with `x-gateway-stream-source: buffered`. Buffered replay is never
+ * presented as native streaming.
+ */
+export type StreamReadiness =
+  | { provenance: "network"; body: ReadableStream<Uint8Array> }
+  | { provenance: "buffered"; reply: TurnReply };
+
+export function executeMessagesTurnStreaming(
+  hub: BridgeHub,
+  provider: string,
+  parsed: ParsedMessagesRequest,
+  turnTimeoutMs: number,
+): Promise<StreamReadiness> {
+  const encoder = new TextEncoder();
+  const id = `msg_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    },
+  });
+  const emit = (event: string, data: unknown) => {
+    controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+  };
+
+  let started = false;
+  let resolveReady!: (r: StreamReadiness) => void;
+  let rejectReady!: (err: unknown) => void;
+  const ready = new Promise<StreamReadiness>((res, rej) => {
+    resolveReady = res;
+    rejectReady = rej;
+  });
+
+  let openBlock: "thinking" | "text" | null = null;
+  let blockIndex = -1;
+  let outputText = "";
+
+  const closeBlock = () => {
+    if (openBlock === null) return;
+    emit("content_block_stop", { type: "content_block_stop", index: blockIndex });
+    openBlock = null;
+  };
+  const openBlockOf = (kind: "thinking" | "text") => {
+    closeBlock();
+    blockIndex += 1;
+    openBlock = kind;
+    emit("content_block_start", {
+      type: "content_block_start",
+      index: blockIndex,
+      content_block: kind === "thinking" ? { type: "thinking", thinking: "" } : { type: "text", text: "" },
+    });
+  };
+
+  const onDelta = (delta: TurnDelta) => {
+    if (!started) {
+      started = true;
+      emit("message_start", {
+        type: "message_start",
+        message: {
+          id,
+          type: "message",
+          role: "assistant",
+          model: parsed.requestedModel,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: estimateTokens(parsed.prompt), output_tokens: 1 },
+        },
+      });
+      resolveReady({ provenance: "network", body });
+    }
+    if (delta.kind === "reasoning") {
+      // Thinking only precedes the answer; a late reasoning fragment after
+      // the text block opened has no honest place to go.
+      if (openBlock === "text") return;
+      if (openBlock !== "thinking") openBlockOf("thinking");
+      emit("content_block_delta", {
+        type: "content_block_delta",
+        index: blockIndex,
+        delta: { type: "thinking_delta", thinking: delta.text },
+      });
+      outputText += delta.text;
+      return;
+    }
+    if (openBlock !== "text") openBlockOf("text");
+    emit("content_block_delta", {
+      type: "content_block_delta",
+      index: blockIndex,
+      delta: { type: "text_delta", text: delta.text },
+    });
+    outputText += delta.text;
+  };
+
+  hub
+    .submitTurn(provider, parsed.prompt, turnTimeoutMs, { onDelta })
+    .then((outcome) => {
+      if (!started) {
+        resolveReady({ provenance: "buffered", reply: plainReply(outcome) });
+        return;
+      }
+      closeBlock();
+      emit("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: estimateTokens(outputText) },
+      });
+      emit("message_stop", { type: "message_stop" });
+      controller.close();
+    })
+    .catch((err: unknown) => {
+      if (!started) {
+        rejectReady(err);
+        return;
+      }
+      // The stream is already with the client; report mid-stream the way the
+      // Anthropic API does, then end the body.
+      const e = err as Error & { code?: string };
+      const mapped = mapCanonicalError(e.code ?? "internal_error");
+      emit("error", { type: "error", error: { type: mapped.type, message: e.message } });
+      try {
+        controller.close();
+      } catch {
+        // already closed
+      }
+    });
+
+  return ready;
 }
 
 /** Non-streaming Anthropic Message envelope. */
@@ -394,7 +552,19 @@ export function synthesizedEventStream(opts: {
     ],
   ];
   opts.reply.content.forEach((block, index) => {
-    if (block.type === "text") {
+    if (block.type === "thinking") {
+      frames.push([
+        "content_block_start",
+        { type: "content_block_start", index, content_block: { type: "thinking", thinking: "" } },
+      ]);
+      for (const chunk of chunkText(block.thinking, 200)) {
+        frames.push([
+          "content_block_delta",
+          { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: chunk } },
+        ]);
+      }
+      frames.push(["content_block_stop", { type: "content_block_stop", index }]);
+    } else if (block.type === "text") {
       frames.push([
         "content_block_start",
         { type: "content_block_start", index, content_block: { type: "text", text: "" } },

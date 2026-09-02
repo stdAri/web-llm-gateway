@@ -69,20 +69,34 @@ export function pageInterceptorSource(): string {
     const post = function (payload) {
       try { w.postMessage({ channel: CHANNEL, payload }, "*"); } catch (e) {}
     };
-    function observeResponseBody(body, isSSE) {
-      try {
-        if (typeof body === "string" && isSSE) {
-          const lines = body.split(/\\r?\\n/);
-          for (const line of lines) {
-            if (line.startsWith("data:")) {
-              const data = line.slice(5).trim();
-              if (data && data !== "[DONE]") {
-                try { post(JSON.parse(data)); } catch (e) {}
-              }
-            }
-          }
+    const emitLine = function (line) {
+      if (line.startsWith("data:")) {
+        const data = line.slice(5).trim();
+        if (data && data !== "[DONE]") {
+          try { post(JSON.parse(data)); } catch (e) {}
         }
-      } catch (e) {}
+      }
+    };
+    // Incremental SSE splitter: frames are posted as the network delivers
+    // them, not after the response completes, so the daemon can stream.
+    function makeObserver() {
+      let pending = "";
+      return {
+        feed: function (text) {
+          try {
+            pending += text;
+            const lines = pending.split(/\\r?\\n/);
+            pending = lines.pop() || "";
+            for (const line of lines) emitLine(line);
+          } catch (e) {}
+        },
+        flush: function () {
+          try {
+            if (pending) emitLine(pending);
+            pending = "";
+          } catch (e) {}
+        }
+      };
     }
     const noteRequest = function (url) {
       try { post({ __gatewayMeta: "request", url: String(url) }); } catch (e) {}
@@ -97,7 +111,24 @@ export function pageInterceptorSource(): string {
         if (isCompletion) {
           promise.then(function (res) {
             try {
-              res.clone().text().then(function (body) { observeResponseBody(body, true); });
+              // The page keeps the original response; the clone is ours to
+              // drain incrementally.
+              const clone = res.clone();
+              const observer = makeObserver();
+              if (!clone.body || typeof clone.body.getReader !== "function") {
+                clone.text().then(function (body) { observer.feed(body); observer.flush(); });
+                return;
+              }
+              const reader = clone.body.getReader();
+              const decoder = new TextDecoder();
+              const pump = function () {
+                reader.read().then(function (r) {
+                  if (r.value) observer.feed(decoder.decode(r.value, { stream: true }));
+                  if (r.done) { observer.flush(); return; }
+                  pump();
+                }).catch(function () {});
+              };
+              pump();
             } catch (e) {}
           }).catch(function () {});
         }
@@ -114,9 +145,16 @@ export function pageInterceptorSource(): string {
     XMLHttpRequest.prototype.send = function (body) {
       const self = this;
       if (this.__llmIsCompletion) {
+        const observer = makeObserver();
+        let seen = 0;
         this.addEventListener("readystatechange", function () {
-          if (self.readyState === 4 && self.status === 200) {
-            observeResponseBody(self.responseText, true);
+          if (self.readyState >= 3 && self.status === 200) {
+            const text = self.responseText || "";
+            if (text.length > seen) {
+              observer.feed(text.slice(seen));
+              seen = text.length;
+            }
+            if (self.readyState === 4) observer.flush();
           }
         });
       }
@@ -488,6 +526,15 @@ function executeTurn(msg) {
   const diagnostics = { rawFrames: 0, answerChars: 0, requestUrls: [], composerFound: false, sendButtonFound: false };
   const assembler = createDeepSeekAssembler();
 
+  const sendDelta = function (kind, text) {
+    if (!text) return;
+    try {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'turn.delta', turnId, provider: PROVIDER, delta: { kind, text } }));
+      }
+    } catch (e) {}
+  };
+
   const onFrame = function (payload) {
     if (payload && payload.__gatewayMeta === 'request') {
       if (diagnostics.requestUrls.length < 25 && diagnostics.requestUrls.indexOf(payload.url) === -1) {
@@ -496,7 +543,9 @@ function executeTurn(msg) {
       return;
     }
     diagnostics.rawFrames++;
-    assembler.push(payload);
+    const delta = assembler.push(payload);
+    if (delta.reasoning) sendDelta('reasoning', delta.reasoning);
+    if (delta.answer) sendDelta('text', delta.answer);
     if (assembler.done) finished = true;
   };
 
@@ -512,7 +561,7 @@ function executeTurn(msg) {
     if (finished || Date.now() > deadline) {
       clearInterval(timer);
       window.removeEventListener('message', onStreamMessage);
-      const { text } = assembler.result();
+      const { text, reasoning } = assembler.result();
       diagnostics.answerChars = text.length;
       // Failing to drive the composer is a real error, not an empty answer:
       // reporting it as text would let a broken selector look like a model
@@ -541,6 +590,7 @@ function executeTurn(msg) {
         turnId,
         provider: PROVIDER,
         text: answerText || (toolCalls ? '' : '(no answer received)'),
+        reasoning: reasoning || undefined,
         streamSource: 'network',
         error,
         toolCalls,

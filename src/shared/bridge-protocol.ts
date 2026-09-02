@@ -57,11 +57,22 @@ export type BridgeMessage =
       payload?: unknown;
     }
   | {
+      type: "turn.delta";
+      turnId: string;
+      provider: string;
+      /** One increment of the in-progress answer. Deltas arrive in order and
+       * precede turn.result; a Bridge that cannot stream simply never sends
+       * them, which the daemon reports as a buffered turn. */
+      delta: { kind: "text" | "reasoning"; text: string };
+    }
+  | {
       type: "turn.result";
       turnId: string;
       provider: string;
       /** The answer prose with tool envelopes removed. */
       text: string;
+      /** Reasoning ("thinking") content, kept separate from the answer. */
+      reasoning?: string;
       streamSource: "network" | "frontend-state" | "dom-diff" | "buffered";
       error?: { code: string; message: string };
       /** Tool envelopes extracted from the answer, per ADR-0012: parsed in the

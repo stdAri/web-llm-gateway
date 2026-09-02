@@ -27,13 +27,21 @@ export interface RegisteredTab {
 interface PendingTurn {
   resolve: (result: TurnOutcome) => void;
   reject: (err: Error) => void;
+  /** Incremental answer fragments as the Bridge observes them (ticket 04). */
+  onDelta?: (delta: TurnDelta) => void;
   /** The daemon conversation this turn belongs to, so the provider-side
    * reference reported in the result lands on the right record. */
   conversationId?: string;
 }
 
+export interface TurnDelta {
+  kind: "text" | "reasoning";
+  text: string;
+}
+
 export interface TurnOutcome {
   text: string;
+  reasoning?: string;
   streamSource: string;
   diagnostics?: Record<string, unknown>;
   toolCalls?: ParsedToolCall[];
@@ -126,7 +134,11 @@ export class BridgeHub {
     provider: string,
     prompt: string,
     timeoutMs: number,
-    opts: { conversationId?: string; conversationRef?: string } = {},
+    opts: {
+      conversationId?: string;
+      conversationRef?: string;
+      onDelta?: (delta: TurnDelta) => void;
+    } = {},
   ): Promise<TurnOutcome> {
     const tab = this.pickTab(provider);
     if (!tab) {
@@ -152,7 +164,12 @@ export class BridgeHub {
         clearTimeout(timer);
         reject(err);
       };
-      byProvider.set(turnId, { resolve: safeResolve, reject: safeReject, conversationId: opts.conversationId });
+      byProvider.set(turnId, {
+        resolve: safeResolve,
+        reject: safeReject,
+        onDelta: opts.onDelta,
+        conversationId: opts.conversationId,
+      });
 
       timer = setTimeout(() => {
         byProvider.delete(turnId);
@@ -299,6 +316,16 @@ export class BridgeHub {
         byProvider?.delete(msg.tabId);
         break;
       }
+      case "turn.delta": {
+        const pending = this.pendingTurns.get(msg.provider)?.get(msg.turnId);
+        if (pending?.onDelta && msg.delta && typeof msg.delta.text === "string") {
+          pending.onDelta({
+            kind: msg.delta.kind === "reasoning" ? "reasoning" : "text",
+            text: msg.delta.text,
+          });
+        }
+        break;
+      }
       case "turn.result": {
         const byProvider = this.pendingTurns.get(msg.provider);
         const pending = byProvider?.get(msg.turnId);
@@ -318,6 +345,7 @@ export class BridgeHub {
         } else {
           pending.resolve({
             text: msg.text,
+            reasoning: msg.reasoning,
             streamSource: msg.streamSource,
             diagnostics: msg.diagnostics,
             toolCalls: msg.toolCalls,

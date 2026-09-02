@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Web LLM Gateway Bridge
 // @namespace    web-llm-gateway
-// @version      0.3.0
+// @version      0.4.0
 // @description  Registers Web Product tabs and executes turns against real web conversations.
 // @downloadURL  https://raw.githubusercontent.com/stdAri/web-llm-gateway/main/dist/bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/stdAri/web-llm-gateway/main/dist/bridge.user.js
@@ -32,7 +32,7 @@ function createDeepSeekAssembler() {
   return {
     push(payload) {
       if (payload === null || typeof payload !== "object")
-        return;
+        return {};
       const frame = payload;
       if (isFinished(frame))
         done = true;
@@ -43,12 +43,17 @@ function createDeepSeekAssembler() {
       const content = typeof block.content === "string" ? block.content : "";
       if (!content) {
         bucket = "none";
-        return;
+        return {};
       }
-      if (bucket === "answer")
+      if (bucket === "answer") {
         text += content;
-      else if (bucket === "reasoning")
+        return { answer: content };
+      }
+      if (bucket === "reasoning") {
         reasoning += content;
+        return { reasoning: content };
+      }
+      return {};
     },
     get done() {
       return done;
@@ -115,7 +120,7 @@ function extractToolEnvelopes(text) {
 }
 
   
-const BRIDGE_VERSION = "0.3.0";
+const BRIDGE_VERSION = "0.4.0";
 const STREAM_CHANNEL = "web-llm-gateway:deepseek-stream";
 const PROVIDER = "deepseek";
 let ws = null;
@@ -279,7 +284,7 @@ function injectPageInterceptor() {
   try {
     const target = unsafeWindow || window;
     const script = document.createElement('script');
-    script.textContent = "(function () {\n    const CHANNEL = \"web-llm-gateway:deepseek-stream\";\n    const SUFFIX = \"/chat/completion\";\n    const w = window;\n    const post = function (payload) {\n      try { w.postMessage({ channel: CHANNEL, payload }, \"*\"); } catch (e) {}\n    };\n    function observeResponseBody(body, isSSE) {\n      try {\n        if (typeof body === \"string\" && isSSE) {\n          const lines = body.split(/\\r?\\n/);\n          for (const line of lines) {\n            if (line.startsWith(\"data:\")) {\n              const data = line.slice(5).trim();\n              if (data && data !== \"[DONE]\") {\n                try { post(JSON.parse(data)); } catch (e) {}\n              }\n            }\n          }\n        }\n      } catch (e) {}\n    }\n    const noteRequest = function (url) {\n      try { post({ __gatewayMeta: \"request\", url: String(url) }); } catch (e) {}\n    };\n    const origFetch = w.fetch;\n    if (origFetch) {\n      w.fetch = function (input, init) {\n        const url = typeof input === \"string\" ? input : (input && input.url) || \"\";\n        const isCompletion = url.indexOf(SUFFIX) !== -1;\n        noteRequest(url);\n        const promise = origFetch.apply(this, arguments);\n        if (isCompletion) {\n          promise.then(function (res) {\n            try {\n              res.clone().text().then(function (body) { observeResponseBody(body, true); });\n            } catch (e) {}\n          }).catch(function () {});\n        }\n        return promise;\n      };\n    }\n    const origOpen = XMLHttpRequest.prototype.open;\n    XMLHttpRequest.prototype.open = function (method, url) {\n      this.__llmIsCompletion = typeof url === \"string\" && url.indexOf(SUFFIX) !== -1;\n      noteRequest(url);\n      return origOpen.apply(this, arguments);\n    };\n    const origSend = XMLHttpRequest.prototype.send;\n    XMLHttpRequest.prototype.send = function (body) {\n      const self = this;\n      if (this.__llmIsCompletion) {\n        this.addEventListener(\"readystatechange\", function () {\n          if (self.readyState === 4 && self.status === 200) {\n            observeResponseBody(self.responseText, true);\n          }\n        });\n      }\n      return origSend.apply(this, arguments);\n    };\n  })();";
+    script.textContent = "(function () {\n    const CHANNEL = \"web-llm-gateway:deepseek-stream\";\n    const SUFFIX = \"/chat/completion\";\n    const w = window;\n    const post = function (payload) {\n      try { w.postMessage({ channel: CHANNEL, payload }, \"*\"); } catch (e) {}\n    };\n    const emitLine = function (line) {\n      if (line.startsWith(\"data:\")) {\n        const data = line.slice(5).trim();\n        if (data && data !== \"[DONE]\") {\n          try { post(JSON.parse(data)); } catch (e) {}\n        }\n      }\n    };\n    // Incremental SSE splitter: frames are posted as the network delivers\n    // them, not after the response completes, so the daemon can stream.\n    function makeObserver() {\n      let pending = \"\";\n      return {\n        feed: function (text) {\n          try {\n            pending += text;\n            const lines = pending.split(/\\r?\\n/);\n            pending = lines.pop() || \"\";\n            for (const line of lines) emitLine(line);\n          } catch (e) {}\n        },\n        flush: function () {\n          try {\n            if (pending) emitLine(pending);\n            pending = \"\";\n          } catch (e) {}\n        }\n      };\n    }\n    const noteRequest = function (url) {\n      try { post({ __gatewayMeta: \"request\", url: String(url) }); } catch (e) {}\n    };\n    const origFetch = w.fetch;\n    if (origFetch) {\n      w.fetch = function (input, init) {\n        const url = typeof input === \"string\" ? input : (input && input.url) || \"\";\n        const isCompletion = url.indexOf(SUFFIX) !== -1;\n        noteRequest(url);\n        const promise = origFetch.apply(this, arguments);\n        if (isCompletion) {\n          promise.then(function (res) {\n            try {\n              // The page keeps the original response; the clone is ours to\n              // drain incrementally.\n              const clone = res.clone();\n              const observer = makeObserver();\n              if (!clone.body || typeof clone.body.getReader !== \"function\") {\n                clone.text().then(function (body) { observer.feed(body); observer.flush(); });\n                return;\n              }\n              const reader = clone.body.getReader();\n              const decoder = new TextDecoder();\n              const pump = function () {\n                reader.read().then(function (r) {\n                  if (r.value) observer.feed(decoder.decode(r.value, { stream: true }));\n                  if (r.done) { observer.flush(); return; }\n                  pump();\n                }).catch(function () {});\n              };\n              pump();\n            } catch (e) {}\n          }).catch(function () {});\n        }\n        return promise;\n      };\n    }\n    const origOpen = XMLHttpRequest.prototype.open;\n    XMLHttpRequest.prototype.open = function (method, url) {\n      this.__llmIsCompletion = typeof url === \"string\" && url.indexOf(SUFFIX) !== -1;\n      noteRequest(url);\n      return origOpen.apply(this, arguments);\n    };\n    const origSend = XMLHttpRequest.prototype.send;\n    XMLHttpRequest.prototype.send = function (body) {\n      const self = this;\n      if (this.__llmIsCompletion) {\n        const observer = makeObserver();\n        let seen = 0;\n        this.addEventListener(\"readystatechange\", function () {\n          if (self.readyState >= 3 && self.status === 200) {\n            const text = self.responseText || \"\";\n            if (text.length > seen) {\n              observer.feed(text.slice(seen));\n              seen = text.length;\n            }\n            if (self.readyState === 4) observer.flush();\n          }\n        });\n      }\n      return origSend.apply(this, arguments);\n    };\n  })();";
     (document.head || document.documentElement).appendChild(script);
     script.remove();
     log('page interceptor injected');
@@ -418,6 +423,15 @@ function executeTurn(msg) {
   const diagnostics = { rawFrames: 0, answerChars: 0, requestUrls: [], composerFound: false, sendButtonFound: false };
   const assembler = createDeepSeekAssembler();
 
+  const sendDelta = function (kind, text) {
+    if (!text) return;
+    try {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'turn.delta', turnId, provider: PROVIDER, delta: { kind, text } }));
+      }
+    } catch (e) {}
+  };
+
   const onFrame = function (payload) {
     if (payload && payload.__gatewayMeta === 'request') {
       if (diagnostics.requestUrls.length < 25 && diagnostics.requestUrls.indexOf(payload.url) === -1) {
@@ -426,7 +440,9 @@ function executeTurn(msg) {
       return;
     }
     diagnostics.rawFrames++;
-    assembler.push(payload);
+    const delta = assembler.push(payload);
+    if (delta.reasoning) sendDelta('reasoning', delta.reasoning);
+    if (delta.answer) sendDelta('text', delta.answer);
     if (assembler.done) finished = true;
   };
 
@@ -442,7 +458,7 @@ function executeTurn(msg) {
     if (finished || Date.now() > deadline) {
       clearInterval(timer);
       window.removeEventListener('message', onStreamMessage);
-      const { text } = assembler.result();
+      const { text, reasoning } = assembler.result();
       diagnostics.answerChars = text.length;
       // Failing to drive the composer is a real error, not an empty answer:
       // reporting it as text would let a broken selector look like a model
@@ -471,6 +487,7 @@ function executeTurn(msg) {
         turnId,
         provider: PROVIDER,
         text: answerText || (toolCalls ? '' : '(no answer received)'),
+        reasoning: reasoning || undefined,
         streamSource: 'network',
         error,
         toolCalls,
