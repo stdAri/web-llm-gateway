@@ -96,6 +96,10 @@ export interface CatalogModel {
 export interface ProviderRegistration {
   provider: string;
   protocolVersion: number;
+  /** The Bridge artifact's own @version. Distinct from protocolVersion: it does
+   * not affect compatibility, it answers "which build is actually running in
+   * the browser right now", which is otherwise unobservable from the daemon. */
+  bridgeVersion?: string;
   models: CatalogModel[];
   capabilities: ProviderCapabilities;
 }

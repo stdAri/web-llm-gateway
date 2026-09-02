@@ -50,6 +50,10 @@ export type BridgeMessage =
       text: string;
       streamSource: "network" | "frontend-state" | "dom-diff" | "buffered";
       error?: { code: string; message: string };
+      /** What the Bridge observed while driving the page. An empty answer is
+       * otherwise indistinguishable between "never submitted the prompt" and
+       * "submitted it but captured no stream". */
+      diagnostics?: Record<string, unknown>;
     }
   | {
       type: "turn.request";

@@ -17,6 +17,9 @@
  * before any request is handled, per CONTEXT.md "Gateway Node".
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { type Server } from "bun";
 import { BridgeHub, type BridgeSocketData } from "./bridge-hub";
 import {
@@ -73,6 +76,15 @@ export class GatewayHTTPServer {
             return Response.json({ ok: true, providers: hub.listProviders() });
           }
 
+          // GET /bridge.user.js — install and update the Bridge from the
+          // running daemon during development. Unauthenticated on purpose: a
+          // userscript manager cannot present the Gateway API Key, the listener
+          // is loopback-only, and the artifact carries no secret now that
+          // pairing happens at runtime.
+          if (url.pathname === "/bridge.user.js" && req.method === "GET") {
+            return serveBridgeArtifact(url);
+          }
+
           // POST /v1/messages — Anthropic Messages (Claude Code). Query
           // parameters (?beta=true) are accepted; routing matches path only.
           if (url.pathname === "/v1/messages" && req.method === "POST") {
@@ -109,6 +121,34 @@ export class GatewayHTTPServer {
 /** The Gateway API Key arrives as `Authorization: Bearer` (Claude Code's
  * ANTHROPIC_AUTH_TOKEN) or `x-api-key`. Only an exact match on the Gateway
  * API Key is accepted — the Bridge Pairing Token does not work here. */
+/**
+ * Serves the built artifact with its update URLs repointed at this daemon.
+ *
+ * The committed artifact keeps its GitHub URLs so a published install tracks
+ * the repository; only this response rewrites them, so a Bridge installed from
+ * the daemon tracks local rebuilds instead. Whichever source it was installed
+ * from becomes its update source, which is why no toggle is needed.
+ */
+export function serveBridgeArtifact(url: URL, distDir?: string): Response {
+  const dir = distDir ?? join(import.meta.dirname, "..", "..", "dist");
+  const path = join(dir, "bridge.user.js");
+  if (!existsSync(path)) {
+    return new Response("bridge artifact not built; run `bun run build:bridge`", { status: 404 });
+  }
+  const local = `${url.origin}/bridge.user.js`;
+  const source = readFileSync(path, "utf8")
+    .replace(/^\/\/ @downloadURL.*$/m, `// @downloadURL  ${local}`)
+    .replace(/^\/\/ @updateURL.*$/m, `// @updateURL    ${local}`);
+  return new Response(source, {
+    headers: {
+      // Tampermonkey keys off the .user.js path, not the content type, but a
+      // no-store response keeps it from installing a cached older build.
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 function hasGatewayKey(req: Request, gatewayApiKey: string): boolean {
   const bearer = req.headers.get("authorization");
   const presented = bearer?.startsWith("Bearer ")
@@ -197,10 +237,16 @@ async function handleTurn(
       return Response.json({ error: { code: "invalid_request", message: "missing or invalid 'prompt' field" } }, { status: 400 });
     }
     const result = await hub.submitTurn(provider, prompt, turnTimeoutMs);
-    return Response.json({ provider, text: result.text, streamSource: result.streamSource });
+    return Response.json({
+      provider,
+      text: result.text,
+      streamSource: result.streamSource,
+      diagnostics: result.diagnostics,
+    });
   } catch (err: unknown) {
     const code = (err as Error & { code?: string }).code ?? "internal_error";
     const message = (err as Error).message ?? "unknown error";
-    return Response.json({ error: { code, message } }, { status: 502 });
+    const diagnostics = (err as Error & { diagnostics?: unknown }).diagnostics;
+    return Response.json({ error: { code, message, diagnostics } }, { status: 502 });
   }
 }

@@ -13,12 +13,9 @@ mkdirSync(dist, { recursive: true });
 
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
 
-const config = {
-  ...BRIDGE_CONFIG_DEFAULT,
-  pairingToken: process.env.BRIDGE_PAIRING_TOKEN || "PAIRING_TOKEN",
-};
-
-const artifact = buildUserscript(config, {
+// No secret is compiled in: the artifact published at @updateURL is public, and
+// the Bridge Pairing Token is entered once in the browser instead.
+const artifact = buildUserscript(BRIDGE_CONFIG_DEFAULT, {
   version: pkg.version,
   updateUrl: "https://raw.githubusercontent.com/stdAri/web-llm-gateway/main/dist/bridge.user.js",
 });

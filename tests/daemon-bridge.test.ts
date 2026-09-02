@@ -75,7 +75,9 @@ describe("BridgeHub provider registration (no hardcoded list)", () => {
       const port = server.port!;
       const client = await openBridge(`ws://127.0.0.1:${port}/bridge`, TOKEN, registration("some-new-provider"));
       await Bun.sleep(50);
-      expect(hub.listProviders()).toEqual([{ provider: "some-new-provider", tabCount: 0 }]);
+      expect(hub.listProviders()).toEqual([
+        { provider: "some-new-provider", tabCount: 0, staleTabCount: 0, bridgeVersions: ["unknown"] },
+      ]);
       client.ws.close();
     } finally {
       server.stop();

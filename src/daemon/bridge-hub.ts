@@ -19,13 +19,20 @@ export interface RegisteredTab {
 }
 
 interface PendingTurn {
-  resolve: (result: { text: string; streamSource: string }) => void;
+  resolve: (result: TurnOutcome) => void;
   reject: (err: Error) => void;
+}
+
+export interface TurnOutcome {
+  text: string;
+  streamSource: string;
+  diagnostics?: Record<string, unknown>;
 }
 
 export interface BridgeSocketData {
   tokenPresented?: boolean;
   provider?: string;
+  bridgeVersion?: string;
 }
 
 export class BridgeHub {
@@ -38,11 +45,30 @@ export class BridgeHub {
 
   constructor(private readonly validPairingToken: string) {}
 
-  listProviders(): { provider: string; tabCount: number }[] {
-    return this.providerOrder.map((p) => ({
-      provider: p,
-      tabCount: this.tabs.get(p)?.size ?? 0,
-    }));
+  static readonly TAB_TTL_MS = 30_000;
+
+  listProviders(): {
+    provider: string;
+    tabCount: number;
+    staleTabCount: number;
+    bridgeVersions: string[];
+  }[] {
+    return this.providerOrder.map((p) => {
+      const all = [...(this.tabs.get(p)?.values() ?? [])];
+      const live = all.filter((t) => t.lastHeartbeat >= Date.now() - BridgeHub.TAB_TTL_MS);
+      return {
+        provider: p,
+        tabCount: live.length,
+        staleTabCount: all.length - live.length,
+        bridgeVersions: [
+          ...new Set(
+            [...this.connections]
+              .filter((c) => c.data.provider === p)
+              .map((c) => c.data.bridgeVersion ?? "unknown"),
+          ),
+        ],
+      };
+    });
   }
 
   tabCount(provider: string): number {
@@ -70,7 +96,7 @@ export class BridgeHub {
     provider: string,
     prompt: string,
     timeoutMs: number,
-  ): Promise<{ text: string; streamSource: string }> {
+  ): Promise<TurnOutcome> {
     const tab = this.pickTab(provider);
     if (!tab) {
       return Promise.reject(
@@ -80,14 +106,14 @@ export class BridgeHub {
       );
     }
     const turnId = `t_${Math.random().toString(36).slice(2, 12)}`;
-    return new Promise<{ text: string; streamSource: string }>((resolve, reject) => {
+    return new Promise<TurnOutcome>((resolve, reject) => {
       let byProvider = this.pendingTurns.get(provider);
       if (!byProvider) {
         byProvider = new Map();
         this.pendingTurns.set(provider, byProvider);
       }
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const safeResolve = (result: { text: string; streamSource: string }) => {
+      const safeResolve = (result: TurnOutcome) => {
         clearTimeout(timer);
         resolve(result);
       };
@@ -137,7 +163,7 @@ export class BridgeHub {
   private pickTab(provider: string): RegisteredTab | undefined {
     const byProvider = this.tabs.get(provider);
     if (!byProvider) return undefined;
-    const live = Date.now() - 30_000;
+    const live = Date.now() - BridgeHub.TAB_TTL_MS;
     for (const tab of byProvider.values()) {
       if (tab.lastHeartbeat >= live) {
         return tab;
@@ -166,6 +192,7 @@ export class BridgeHub {
         }
         ws.data.tokenPresented = true;
         ws.data.provider = msg.registration.provider;
+        ws.data.bridgeVersion = msg.registration.bridgeVersion;
         this.noteProvider(msg.registration.provider);
         const version = msg.registration.protocolVersion;
         if (version !== BRIDGE_PROTOCOL_VERSION) {
@@ -219,9 +246,18 @@ export class BridgeHub {
         if (!pending) break;
         byProvider!.delete(msg.turnId);
         if (msg.error) {
-          pending.reject(Object.assign(new Error(msg.error.message), { code: msg.error.code }));
+          pending.reject(
+            Object.assign(new Error(msg.error.message), {
+              code: msg.error.code,
+              diagnostics: msg.diagnostics,
+            }),
+          );
         } else {
-          pending.resolve({ text: msg.text, streamSource: msg.streamSource });
+          pending.resolve({
+            text: msg.text,
+            streamSource: msg.streamSource,
+            diagnostics: msg.diagnostics,
+          });
         }
         break;
       }

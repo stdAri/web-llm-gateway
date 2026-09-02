@@ -1,28 +1,240 @@
 {
-  "site": "chat.deepseek.com",
-  "capturedAt": "2026-09-02T00:00:00.000Z",
-  "redacted": true,
-  "note": "Redacted SSE payloads captured from DeepSeek's completion-suffixed streaming endpoint. Reasoning content is truncated and randomized; answer content is synthetic. Recorded before adapter shipping, per docs/research/doubao-deepseek-behavior.md.",
-  "frames": [
-    {
-      "label": "reasoning-delta",
-      "payload": { "reasoning_content": "用户希望我回答一个简单问题。让我先想一下……" }
-    },
-    {
-      "label": "answer-delta-1",
-      "payload": { "choices": [{ "delta": { "content": "你好，世界。" }, "index": 0 }] }
-    },
-    {
-      "label": "answer-delta-2",
-      "payload": { "choices": [{ "delta": { "content": "这是一个测试回答。" }, "index": 0 }] }
-    },
-    {
-      "label": "finish-reason",
-      "payload": { "choices": [{ "delta": {}, "index": 0, "finish_reason": "stop" }] }
-    },
-    {
-      "label": "reasoning-inside-delta",
-      "payload": { "choices": [{ "delta": { "reasoning_content": "思考过程在 delta 内。" }, "index": 0 }] }
+ "note": "Recorded from a real chat.deepseek.com turn, captured in the page via the Bridge's own interceptor channel. DeepSeek streams a stateful patch protocol, not OpenAI-style deltas: `v` carries the value, `p` a JSON-pointer path, `o` an operation, and a frame with only `v` continues whatever fragment the previous frame established. The earlier synthetic fixture encoded an OpenAI-shaped protocol that does not exist here, which is why 92 real frames parsed to zero.",
+ "capturedFrom": "chat.deepseek.com",
+ "capturedAt": "2026-09-02",
+ "prompt": "只回答两个字：你好",
+ "expected": {
+  "text": "你好",
+  "reasoningStartsWith": "我们需要根据用户的指令来回答"
+ },
+ "frames": [
+  {
+   "request_message_id": 3,
+   "response_message_id": 4,
+   "model_type": "default"
+  },
+  {
+   "updated_at": 1788354489.6961
+  },
+  {
+   "v": {
+    "response": {
+     "message_id": 4,
+     "parent_id": 3,
+     "model": "",
+     "role": "ASSISTANT",
+     "thinking_enabled": true,
+     "ban_edit": false,
+     "ban_regenerate": false,
+     "status": "WIP",
+     "incomplete_message": null,
+     "accumulated_token_usage": 63,
+     "feedback": null,
+     "inserted_at": 1788354489.683038,
+     "search_enabled": true,
+     "fragments": [
+      {
+       "id": 2,
+       "type": "THINK",
+       "content": "我们需要",
+       "elapsed_secs": null,
+       "references": [],
+       "stage_id": 1
+      }
+     ],
+     "conversation_mode": "DEFAULT",
+     "has_pending_fragment": false,
+     "auto_continue": false,
+     "search_triggered": false
     }
-  ]
+   }
+  },
+  {
+   "p": "response/fragments/-1/content",
+   "o": "APPEND",
+   "v": "根据"
+  },
+  {
+   "v": "用户的"
+  },
+  {
+   "v": "指令"
+  },
+  {
+   "v": "来"
+  },
+  {
+   "v": "回答"
+  },
+  {
+   "v": "。"
+  },
+  {
+   "v": "用户"
+  },
+  {
+   "v": "说"
+  },
+  {
+   "v": "“"
+  },
+  {
+   "v": "只"
+  },
+  {
+   "v": "回答"
+  },
+  {
+   "v": "两个字"
+  },
+  {
+   "v": "："
+  },
+  {
+   "v": "你好"
+  },
+  {
+   "v": "”，"
+  },
+  {
+   "v": "那么"
+  },
+  {
+   "v": "我们的"
+  },
+  {
+   "v": "回答"
+  },
+  {
+   "v": "应该"
+  },
+  {
+   "v": "只有"
+  },
+  {
+   "v": "“"
+  },
+  {
+   "v": "你好"
+  },
+  {
+   "v": "”"
+  },
+  {
+   "v": "两个字"
+  },
+  {
+   "v": "，"
+  },
+  {
+   "v": "不能"
+  },
+  {
+   "v": "有多"
+  },
+  {
+   "v": "余"
+  },
+  {
+   "v": "内容"
+  },
+  {
+   "v": "。"
+  },
+  {
+   "v": "之前的"
+  },
+  {
+   "v": "对话"
+  },
+  {
+   "v": "是关于"
+  },
+  {
+   "v": "首都"
+  },
+  {
+   "v": "的"
+  },
+  {
+   "v": "，"
+  },
+  {
+   "v": "但"
+  },
+  {
+   "v": "现在是"
+  },
+  {
+   "v": "新的"
+  },
+  {
+   "v": "指令"
+  },
+  {
+   "v": "。"
+  },
+  {
+   "v": "所以"
+  },
+  {
+   "v": "直接"
+  },
+  {
+   "v": "回复"
+  },
+  {
+   "v": "“"
+  },
+  {
+   "v": "你好"
+  },
+  {
+   "v": "”。"
+  },
+  {
+   "p": "response/fragments/-1/elapsed_secs",
+   "o": "SET",
+   "v": 0.807232599
+  },
+  {
+   "p": "response/fragments",
+   "o": "APPEND",
+   "v": [
+    {
+     "id": 3,
+     "type": "RESPONSE",
+     "content": "你好",
+     "references": [],
+     "stage_id": 1
+    }
+   ]
+  },
+  {
+   "p": "response",
+   "o": "BATCH",
+   "v": [
+    {
+     "p": "accumulated_token_usage",
+     "v": 88
+    },
+    {
+     "p": "quasi_status",
+     "v": "FINISHED"
+    }
+   ]
+  },
+  {
+   "p": "response/status",
+   "o": "SET",
+   "v": "FINISHED"
+  },
+  {
+   "updated_at": 1788354490.258761
+  },
+  {
+   "click_behavior": "none",
+   "auto_resume": false
+  }
+ ]
 }
