@@ -207,7 +207,13 @@ async function handleMessages(
   // the client, so there is nothing honest to stream mid-turn.
   if (parsed.stream && !parsed.tools && !parsed.toolResults) {
     try {
-      const readiness = await executeMessagesTurnStreaming(hub, provider, parsed, turnTimeoutMs);
+      const readiness = await executeMessagesTurnStreaming(
+        hub,
+        provider,
+        parsed,
+        turnTimeoutMs,
+        req.signal,
+      );
       headers["content-type"] = "text/event-stream; charset=utf-8";
       headers["cache-control"] = "no-cache";
       headers["x-gateway-stream-source"] = readiness.provenance;
@@ -226,7 +232,14 @@ async function handleMessages(
   }
 
   try {
-    const reply = await executeMessagesTurn(hub, toolLoop, provider, parsed, turnTimeoutMs);
+    const reply = await executeMessagesTurn(
+      hub,
+      toolLoop,
+      provider,
+      parsed,
+      turnTimeoutMs,
+      req.signal,
+    );
     if (parsed.stream) {
       // Tool turns: synthesized from a complete, validated answer — the
       // provenance header must say so.
@@ -261,11 +274,12 @@ async function handleTurn(
     if (!prompt || typeof prompt !== "string") {
       return Response.json({ error: { code: "invalid_request", message: "missing or invalid 'prompt' field" } }, { status: 400 });
     }
-    const result = await hub.submitTurn(provider, prompt, turnTimeoutMs);
+    const result = await hub.submitTurn(provider, prompt, turnTimeoutMs, { signal: req.signal });
     return Response.json({
       provider,
       text: result.text,
       reasoning: result.reasoning,
+      cancelled: result.cancelled,
       streamSource: result.streamSource,
       diagnostics: result.diagnostics,
     });

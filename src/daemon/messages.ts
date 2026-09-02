@@ -257,7 +257,7 @@ export type ResponseContentBlock =
 
 export interface TurnReply {
   content: ResponseContentBlock[];
-  stopReason: "end_turn" | "tool_use";
+  stopReason: "end_turn" | "tool_use" | "cancelled";
   /** Text the usage estimate is computed from. */
   outputText: string;
 }
@@ -270,7 +270,9 @@ function plainReply(outcome: TurnOutcome): TurnReply {
   content.push({ type: "text", text: outcome.text });
   return {
     content,
-    stopReason: "end_turn",
+    // A cancelled turn is an outcome, not a failure: the partial answer is
+    // returned with the stop reason that says why it is short.
+    stopReason: outcome.cancelled ? "cancelled" : "end_turn",
     outputText: (outcome.reasoning ?? "") + outcome.text,
   };
 }
@@ -286,6 +288,7 @@ export async function executeMessagesTurn(
   provider: string,
   parsed: ParsedMessagesRequest,
   turnTimeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<TurnReply> {
   let prompt: string;
   let conv;
@@ -315,14 +318,18 @@ export async function executeMessagesTurn(
     prompt = toolLoop.buildSetupPrompt(conv, parsed.prompt);
   } else {
     // No tools: the ticket 01/02 path, with reasoning split out (ticket 04).
-    const outcome = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs);
+    const outcome = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs, { signal });
     return plainReply(outcome);
   }
 
   for (;;) {
     const outcome = await hub.submitTurn(provider, prompt, turnTimeoutMs, {
       conversationId: conv.id,
+      signal,
     });
+    // Cancelling has to end the loop, not just the round: another round would
+    // start the Web Product generating again right after it was stopped.
+    if (outcome.cancelled) return plainReply(outcome);
     const assessment = toolLoop.assess(conv, outcome);
     if (assessment.kind === "nudge") {
       console.log(`[tool-loop] ${conv.id} nudge: ${assessment.reason}`);
@@ -384,6 +391,7 @@ export function executeMessagesTurnStreaming(
   provider: string,
   parsed: ParsedMessagesRequest,
   turnTimeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<StreamReadiness> {
   const encoder = new TextEncoder();
   const id = `msg_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -393,9 +401,32 @@ export function executeMessagesTurnStreaming(
       controller = c;
     },
   });
+  // Once the body is closed -- by us, or by the client hanging up -- writing to
+  // it throws. Every emit site is equally exposed, so the guard belongs here
+  // rather than at each call.
+  let bodyClosed = false;
   const emit = (event: string, data: unknown) => {
-    controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    if (bodyClosed) return;
+    try {
+      controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    } catch {
+      bodyClosed = true;
+    }
   };
+  const endBody = () => {
+    if (bodyClosed) return;
+    bodyClosed = true;
+    try {
+      controller.close();
+    } catch {
+      // The client already went away.
+    }
+  };
+  // A client that hangs up mid-stream stops being a destination immediately;
+  // cancellation of the upstream turn is handled separately by the signal.
+  signal?.addEventListener("abort", () => {
+    bodyClosed = true;
+  }, { once: true });
 
   let started = false;
   let resolveReady!: (r: StreamReadiness) => void;
@@ -466,7 +497,7 @@ export function executeMessagesTurnStreaming(
   };
 
   hub
-    .submitTurn(provider, parsed.prompt, turnTimeoutMs, { onDelta })
+    .submitTurn(provider, parsed.prompt, turnTimeoutMs, { onDelta, signal })
     .then((outcome) => {
       if (!started) {
         resolveReady({ provenance: "buffered", reply: plainReply(outcome) });
@@ -475,11 +506,16 @@ export function executeMessagesTurnStreaming(
       closeBlock();
       emit("message_delta", {
         type: "message_delta",
-        delta: { stop_reason: "end_turn", stop_sequence: null },
+        // A stream that was cancelled mid-flight must not claim it ended on its
+        // own terms; the client is told the answer is short because it stopped.
+        delta: {
+          stop_reason: outcome.cancelled ? "cancelled" : "end_turn",
+          stop_sequence: null,
+        },
         usage: { output_tokens: estimateTokens(outputText) },
       });
       emit("message_stop", { type: "message_stop" });
-      controller.close();
+      endBody();
     })
     .catch((err: unknown) => {
       if (!started) {
@@ -491,11 +527,7 @@ export function executeMessagesTurnStreaming(
       const e = err as Error & { code?: string };
       const mapped = mapCanonicalError(e.code ?? "internal_error");
       emit("error", { type: "error", error: { type: mapped.type, message: e.message } });
-      try {
-        controller.close();
-      } catch {
-        // already closed
-      }
+      endBody();
     });
 
   return ready;

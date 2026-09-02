@@ -40,6 +40,8 @@ export interface TurnDelta {
 }
 
 export interface TurnOutcome {
+  /** The turn was stopped deliberately; `text` holds whatever arrived first. */
+  cancelled?: boolean;
   text: string;
   reasoning?: string;
   streamSource: string;
@@ -79,6 +81,13 @@ export class BridgeHub {
   constructor(private readonly validPairingToken: string) {}
 
   static readonly TAB_TTL_MS = 30_000;
+  /**
+   * How long a cancelled turn waits for the Bridge's partial result before
+   * settling without it. The Bridge answers a cancel synchronously over an
+   * already-open loopback socket, so this only covers a Bridge that has died;
+   * generous for that, and short enough that a dead Bridge cannot hold a turn.
+   */
+  static readonly CANCEL_GRACE_MS = 2_000;
 
   listProviders(): {
     provider: string;
@@ -138,6 +147,8 @@ export class BridgeHub {
       conversationId?: string;
       conversationRef?: string;
       onDelta?: (delta: TurnDelta) => void;
+      /** Aborting stops generation in the Web Product, not just this stream. */
+      signal?: AbortSignal;
     } = {},
   ): Promise<TurnOutcome> {
     const tab = this.pickTab(provider);
@@ -156,14 +167,53 @@ export class BridgeHub {
         this.pendingTurns.set(provider, byProvider);
       }
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const safeResolve = (result: TurnOutcome) => {
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
         clearTimeout(timer);
+        clearTimeout(graceTimer);
+        opts.signal?.removeEventListener("abort", onAbort);
+      };
+      const safeResolve = (result: TurnOutcome) => {
+        cleanup();
         resolve(result);
       };
       const safeReject = (err: Error) => {
-        clearTimeout(timer);
+        cleanup();
         reject(err);
       };
+
+      /**
+       * Cancellation has to reach the page, or the Web Product keeps generating
+       * an answer nobody will read and keeps burning the account's capacity.
+       * The Bridge answers with the partial turn; the grace timer only covers
+       * a Bridge that never answers, so the turn cannot hang on cancel.
+       */
+      let dispatchedTo: ServerWebSocket<BridgeSocketData> | undefined;
+      /**
+       * Tell the Bridge to stop generating this turn in the page.
+       *
+       * Not "any connection for this provider": a conversation is pinned to one
+       * Bridge, and stopping the wrong tab would leave this one running.
+       */
+      const stopUpstream = () => {
+        if (!dispatchedTo) return;
+        const cancel: BridgeMessage = { type: "turn.cancel", turnId, provider };
+        console.log(`[hub] turn ${turnId} cancelled by client; stop sent to the owning bridge`);
+        try {
+          dispatchedTo.send(JSON.stringify(cancel));
+        } catch {
+          // The Bridge is gone; nothing is generating there either.
+        }
+      };
+
+      const onAbort = () => {
+        stopUpstream();
+        graceTimer = setTimeout(() => {
+          byProvider.delete(turnId);
+          safeResolve({ text: "", streamSource: "buffered", cancelled: true });
+        }, BridgeHub.CANCEL_GRACE_MS);
+      };
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
       byProvider.set(turnId, {
         resolve: safeResolve,
         reject: safeReject,
@@ -172,11 +222,18 @@ export class BridgeHub {
       });
 
       timer = setTimeout(() => {
+        // Abandoning the turn is not enough: without this the Web Product keeps
+        // generating an answer nobody will read, burning the account's capacity
+        // and leaving the tab busy long after the caller gave up.
+        stopUpstream();
         byProvider.delete(turnId);
+        // Name the knob, so the message says what to change rather than just
+        // that time ran out.
         safeReject(
-          Object.assign(new Error(`turn timed out after ${timeoutMs}ms`), {
-            code: "turn_timeout",
-          }),
+          Object.assign(
+            new Error(`turn exceeded turn_timeout_ms (${timeoutMs}ms) and was abandoned`),
+            { code: "turn_timeout" },
+          ),
         );
       }, timeoutMs);
 
@@ -231,7 +288,11 @@ export class BridgeHub {
         // Bridge can verify the tab still sits on that conversation.
         conversationRef: route?.ref,
       };
+      dispatchedTo = target;
       target.send(JSON.stringify(command));
+      // An abort that arrived before dispatch has nothing to cancel yet; run it
+      // now that the turn is actually in flight.
+      if (opts.signal?.aborted) onAbort();
     });
   }
 
@@ -344,6 +405,7 @@ export class BridgeHub {
           );
         } else {
           pending.resolve({
+            cancelled: msg.cancelled,
             text: msg.text,
             reasoning: msg.reasoning,
             streamSource: msg.streamSource,

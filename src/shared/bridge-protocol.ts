@@ -74,6 +74,9 @@ export type BridgeMessage =
       /** Reasoning ("thinking") content, kept separate from the answer. */
       reasoning?: string;
       streamSource: "network" | "frontend-state" | "dom-diff" | "buffered";
+      /** Set when the turn ended because it was cancelled rather than finished.
+       * Distinct from `error`: a cancelled turn is an outcome, not a failure. */
+      cancelled?: boolean;
       error?: { code: string; message: string };
       /** Tool envelopes extracted from the answer, per ADR-0012: parsed in the
        * page, but never trusted — the daemon revalidates every call. */
@@ -88,6 +91,14 @@ export type BridgeMessage =
        * otherwise indistinguishable between "never submitted the prompt" and
        * "submitted it but captured no stream". */
       diagnostics?: Record<string, unknown>;
+    }
+  | {
+      /** Daemon -> Bridge: stop generating this turn in the Web Product. The
+       * Bridge answers with a `turn.result` carrying `cancelled` and whatever
+       * partial text it had assembled. */
+      type: "turn.cancel";
+      turnId: string;
+      provider: string;
     }
   | {
       type: "turn.request";

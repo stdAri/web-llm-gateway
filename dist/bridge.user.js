@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Web LLM Gateway Bridge
 // @namespace    web-llm-gateway
-// @version      0.4.0
+// @version      0.5.0
 // @description  Registers Web Product tabs and executes turns against real web conversations.
 // @downloadURL  https://raw.githubusercontent.com/stdAri/web-llm-gateway/main/dist/bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/stdAri/web-llm-gateway/main/dist/bridge.user.js
@@ -22,6 +22,7 @@
   completionSuffix: "/chat/completion",
   composerSelector: "textarea",
   sendButtonSelector: 'div[role="button"].ds-button--primary.ds-button--filled',
+  stopButtonSelector: 'div[role="button"].ds-button--primary.ds-button--filled',
   disabledClass: "ds-button--disabled"
 };
 function createDeepSeekAssembler() {
@@ -120,12 +121,14 @@ function extractToolEnvelopes(text) {
 }
 
   
-const BRIDGE_VERSION = "0.4.0";
+const BRIDGE_VERSION = "0.5.0";
 const STREAM_CHANNEL = "web-llm-gateway:deepseek-stream";
 const PROVIDER = "deepseek";
 let ws = null;
 let heartbeatTimer = null;
 let tabId = null;
+/** turnId -> finish(opts), so a cancel arriving later can end that exact turn. */
+const inFlightTurns = {};
 
 function log(...args) { console.log('[bridge]', ...args); }
 
@@ -386,6 +389,9 @@ function handleMessage(msg) {
     case 'turn.request':
       executeTurn(msg);
       break;
+    case 'turn.cancel':
+      cancelTurn(msg.turnId);
+      break;
     default:
       break;
   }
@@ -454,17 +460,28 @@ function executeTurn(msg) {
     }
   }
 
-  const poll = function () {
-    if (finished || Date.now() > deadline) {
-      clearInterval(timer);
-      window.removeEventListener('message', onStreamMessage);
+  // One exit for every way a turn can end -- stream finished, deadline passed,
+  // or cancelled -- so a cancelled turn reports the same shape, and the poll
+  // loop and listener are always torn down exactly once.
+  let settled = false;
+  const finish = function (opts) {
+    if (settled) return;
+    settled = true;
+    delete inFlightTurns[turnId];
+    clearInterval(timer);
+    window.removeEventListener('message', onStreamMessage);
+    {
+      const cancelled = !!(opts && opts.cancelled);
       const { text, reasoning } = assembler.result();
       diagnostics.answerChars = text.length;
       // Failing to drive the composer is a real error, not an empty answer:
       // reporting it as text would let a broken selector look like a model
       // that simply said nothing.
       let error;
-      if (!diagnostics.composerFound) {
+      if (cancelled) {
+        // A cancelled turn is an outcome, not a failure: the partial answer is
+        // returned as-is and no diagnostic error is synthesised.
+      } else if (!diagnostics.composerFound) {
         error = { code: 'composer_not_found', message: 'no composer element matched on the page' };
       } else if (!diagnostics.sendButtonFound) {
         error = { code: 'send_button_not_found', message: 'composer was filled but no send control matched' };
@@ -476,7 +493,9 @@ function executeTurn(msg) {
       let answerText = text;
       let toolCalls;
       let envelopeError;
-      if (!error && text) {
+      // Partial output cannot be trusted to contain a complete tool envelope,
+      // so a cancelled turn never yields tool calls.
+      if (!error && !cancelled && text) {
         const extraction = extractToolEnvelopes(text);
         answerText = extraction.text;
         if (extraction.calls.length > 0) toolCalls = extraction.calls;
@@ -486,9 +505,10 @@ function executeTurn(msg) {
         type: 'turn.result',
         turnId,
         provider: PROVIDER,
-        text: answerText || (toolCalls ? '' : '(no answer received)'),
+        text: answerText || (toolCalls || cancelled ? '' : '(no answer received)'),
         reasoning: reasoning || undefined,
         streamSource: 'network',
+        cancelled: cancelled || undefined,
         error,
         toolCalls,
         envelopeError,
@@ -496,9 +516,13 @@ function executeTurn(msg) {
         diagnostics
       }));
       setStatus('connected');
-      return;
     }
   };
+
+  const poll = function () {
+    if (finished || Date.now() > deadline) finish({ cancelled: false });
+  };
+  inFlightTurns[turnId] = finish;
   timer = setInterval(poll, 400);
 
   submitPrompt(prompt, diagnostics);
@@ -546,6 +570,35 @@ function findSendButton() {
   });
   if (byLabel && !isSendDisabled(byLabel)) return byLabel;
   return null;
+}
+
+/**
+ * Cancel one in-flight turn: stop the Web Product generating, then settle the
+ * turn locally. The stop click alone is not enough -- generation halts but the
+ * completion stream emits no terminating frame, so nothing would ever end the
+ * turn except its own deadline.
+ */
+function cancelTurn(turnId) {
+  const finish = inFlightTurns[turnId];
+  if (!finish) return;
+  stopGeneration();
+  finish({ cancelled: true });
+}
+
+function stopGeneration() {
+  try {
+    const stop = document.querySelector("div[role=\"button\"].ds-button--primary.ds-button--filled");
+    // Disabled means the page is already idle; clicking would do nothing, and
+    // on an idle composer it is the send control instead.
+    if (stop && !isSendDisabled(stop)) {
+      stop.click();
+      log('stopped generation in the page');
+    } else {
+      log('nothing to stop -- the page is already idle');
+    }
+  } catch (e) {
+    log('could not stop generation', e);
+  }
 }
 
 function isSendDisabled(el) {

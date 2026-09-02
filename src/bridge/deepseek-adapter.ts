@@ -30,7 +30,18 @@ export const DEEPSEEK = {
    * composer is empty, dropping that class once the composer has content.
    */
   sendButtonSelector: 'div[role="button"].ds-button--primary.ds-button--filled',
-  /** Present on the send control while it refuses to submit. */
+  /**
+   * The stop control. Verified live: while a turn is generating, DeepSeek keeps
+   * the same element and swaps only its icon, so this is deliberately the same
+   * selector as the send control rather than a second element to find.
+   *
+   * Also verified: clicking it halts generation but the completion stream emits
+   * no terminating frame, so a cancelled turn has to be finalised by the Bridge
+   * itself. Waiting for the stream to say it ended leaves the turn hanging for
+   * the full deadline while the page sits idle.
+   */
+  stopButtonSelector: 'div[role="button"].ds-button--primary.ds-button--filled',
+  /** Present on the control while it refuses to submit or stop. */
   disabledClass: "ds-button--disabled",
 } as const;
 

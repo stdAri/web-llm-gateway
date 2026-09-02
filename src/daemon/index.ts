@@ -8,12 +8,13 @@
 
 import { resolve } from "node:path";
 import { GatewayStore } from "./store";
+import { resolveTurnTimeoutMs } from "./config";
 import { BridgeHub } from "./bridge-hub";
 import { GatewayHTTPServer } from "./http-server";
 
 const GATEWAY_DIR = resolve(process.env.GATEWAY_DIR ?? ".gateway");
 const DEFAULT_PORT = 8100;
-const TURN_TIMEOUT_MS = 300_000;
+const TURN_TIMEOUT_MS = resolveTurnTimeoutMs();
 
 const command = process.argv[2] ?? "serve";
 
