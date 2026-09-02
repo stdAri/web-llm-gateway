@@ -187,9 +187,14 @@ describe("POST /v1/messages — what Claude Code sends", () => {
     const bridge = await connectFakeBridge(`ws://127.0.0.1:${port}/bridge`, DEEPSEEK_PROVIDER, "pong");
     const res = await postMessages(port, claudeCodeRequest());
     const unhonoured = res.headers.get("x-gateway-unhonoured-fields") ?? "";
-    for (const field of ["max_tokens", "metadata", "thinking", "tool_choice", "tools"]) {
+    for (const field of ["max_tokens", "metadata", "thinking"]) {
       expect(unhonoured).toContain(field);
     }
+    // tools and tool_choice are honoured since ticket 03 — they must no
+    // longer appear in this report.
+    const listed = unhonoured.split(",");
+    expect(listed).not.toContain("tools");
+    expect(listed).not.toContain("tool_choice");
     bridge.ws.close();
   });
 

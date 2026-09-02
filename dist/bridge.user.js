@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Web LLM Gateway Bridge
 // @namespace    web-llm-gateway
-// @version      0.2.0
+// @version      0.3.0
 // @description  Registers Web Product tabs and executes turns against real web conversations.
 // @downloadURL  https://raw.githubusercontent.com/stdAri/web-llm-gateway/main/dist/bridge.user.js
 // @updateURL    https://raw.githubusercontent.com/stdAri/web-llm-gateway/main/dist/bridge.user.js
@@ -82,9 +82,40 @@ function isFinished(frame) {
   }
   return false;
 }
+function extractToolEnvelopes(text) {
+  if (text.indexOf("<tool_call") === -1)
+    return { text, calls: [] };
+  const re = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/g;
+  const calls = [];
+  let stripped = "";
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    stripped += text.slice(last, m.index);
+    last = m.index + m[0].length;
+    const attrs = {};
+    const attrRe = /(\w+)="([^"]*)"/g;
+    let a;
+    while ((a = attrRe.exec(m[1])) !== null)
+      attrs[a[1]] = a[2];
+    const body = m[2].trim();
+    let args = {};
+    try {
+      args = body ? JSON.parse(body) : {};
+    } catch {
+      return { text, calls: [], envelopeError: "malformed JSON in tool_call body" };
+    }
+    calls.push({ nonce: attrs.nonce, id: attrs.id, name: attrs.name, arguments: args });
+  }
+  stripped += text.slice(last);
+  if (calls.length === 0 || stripped.indexOf("<tool_call") !== -1) {
+    return { text, calls: [], envelopeError: "unclosed tool_call tag" };
+  }
+  return { text: stripped.trim(), calls };
+}
 
   
-const BRIDGE_VERSION = "0.2.0";
+const BRIDGE_VERSION = "0.3.0";
 const STREAM_CHANNEL = "web-llm-gateway:deepseek-stream";
 const PROVIDER = "deepseek";
 let ws = null;
@@ -356,13 +387,25 @@ function handleMessage(msg) {
 }
 
 function executeTurn(msg) {
-  const { turnId, provider, prompt } = msg;
+  const { turnId, provider, prompt, conversationRef } = msg;
   if (provider !== PROVIDER) {
     ws.send(JSON.stringify({ type: 'turn.reject', turnId, provider, reason: 'unknown provider: ' + provider }));
     return;
   }
   if (!isDeepSeekPage()) {
     ws.send(JSON.stringify({ type: 'turn.reject', turnId, provider, reason: 'not on chat.deepseek.com' }));
+    return;
+  }
+  // A continuation must land in the same web conversation the earlier turns
+  // ran in; if the Developer User navigated the tab away, say so instead of
+  // posting tool results into an unrelated conversation.
+  if (conversationRef && location.href !== conversationRef) {
+    ws.send(JSON.stringify({
+      type: 'turn.reject',
+      turnId,
+      provider,
+      reason: 'tab is on ' + location.href + ', not the conversation it is asked to continue (' + conversationRef + ')'
+    }));
     return;
   }
 
@@ -412,13 +455,27 @@ function executeTurn(msg) {
       } else if (!text) {
         error = { code: 'no_stream_captured', message: 'prompt was submitted but no completion stream was captured' };
       }
+      // Tool envelopes are extracted in the page (ADR-0012); the daemon
+      // revalidates every call before anything reaches an Agent Client.
+      let answerText = text;
+      let toolCalls;
+      let envelopeError;
+      if (!error && text) {
+        const extraction = extractToolEnvelopes(text);
+        answerText = extraction.text;
+        if (extraction.calls.length > 0) toolCalls = extraction.calls;
+        envelopeError = extraction.envelopeError;
+      }
       ws.send(JSON.stringify({
         type: 'turn.result',
         turnId,
         provider: PROVIDER,
-        text: text || '(no answer received)',
+        text: answerText || (toolCalls ? '' : '(no answer received)'),
         streamSource: 'network',
         error,
+        toolCalls,
+        envelopeError,
+        conversationRef: location.href,
         diagnostics
       }));
       setStatus('connected');

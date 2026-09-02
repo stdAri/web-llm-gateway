@@ -9,7 +9,13 @@
  */
 
 import type { ServerWebSocket, WebSocketHandler } from "bun";
-import { BRIDGE_PROTOCOL_VERSION, type BridgeMessage, isBridgeMessage } from "../shared/bridge-protocol";
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  type BridgeMessage,
+  isBridgeMessage,
+  type ParsedToolCall,
+} from "../shared/bridge-protocol";
+import type { ProviderRegistration } from "../shared/canonical";
 
 export interface RegisteredTab {
   tabId: string;
@@ -21,12 +27,26 @@ export interface RegisteredTab {
 interface PendingTurn {
   resolve: (result: TurnOutcome) => void;
   reject: (err: Error) => void;
+  /** The daemon conversation this turn belongs to, so the provider-side
+   * reference reported in the result lands on the right record. */
+  conversationId?: string;
 }
 
 export interface TurnOutcome {
   text: string;
   streamSource: string;
   diagnostics?: Record<string, unknown>;
+  toolCalls?: ParsedToolCall[];
+  envelopeError?: string;
+  conversationRef?: string;
+}
+
+/** A daemon-issued conversation pinned to the Bridge connection that ran its
+ * first turn, so continuation turns return to the same web conversation. */
+interface ConversationRoute {
+  provider: string;
+  ws: ServerWebSocket<BridgeSocketData>;
+  ref?: string;
 }
 
 export interface BridgeSocketData {
@@ -42,6 +62,11 @@ export class BridgeHub {
   private pendingTurns = new Map<string, Map<string, PendingTurn>>();
   private connections = new Set<ServerWebSocket<BridgeSocketData>>();
   private providerOrder: string[] = [];
+  /** provider -> registration announced at hello (capabilities included, so
+   * the honest `tools: prompt-emulated` report is observable). */
+  private registrations = new Map<string, ProviderRegistration>();
+  /** conversationId -> the connection that conversation is bound to */
+  private conversations = new Map<string, ConversationRoute>();
 
   constructor(private readonly validPairingToken: string) {}
 
@@ -52,6 +77,7 @@ export class BridgeHub {
     tabCount: number;
     staleTabCount: number;
     bridgeVersions: string[];
+    tools?: ProviderRegistration["capabilities"]["tools"];
   }[] {
     return this.providerOrder.map((p) => {
       const all = [...(this.tabs.get(p)?.values() ?? [])];
@@ -67,6 +93,7 @@ export class BridgeHub {
               .map((c) => c.data.bridgeVersion ?? "unknown"),
           ),
         ],
+        tools: this.registrations.get(p)?.capabilities.tools,
       };
     });
   }
@@ -91,11 +118,15 @@ export class BridgeHub {
     byProvider.set(tabId, { tabId, provider, url, lastHeartbeat: Date.now() });
   }
 
-  /** Submit a text prompt to a provider and wait for the complete answer. */
+  /** Submit a text prompt to a provider and wait for the complete answer.
+   * With `conversationId`, the turn continues that conversation on the Bridge
+   * connection it is bound to; a new conversation id pins itself to whichever
+   * live connection takes the first turn. */
   submitTurn(
     provider: string,
     prompt: string,
     timeoutMs: number,
+    opts: { conversationId?: string; conversationRef?: string } = {},
   ): Promise<TurnOutcome> {
     const tab = this.pickTab(provider);
     if (!tab) {
@@ -121,7 +152,7 @@ export class BridgeHub {
         clearTimeout(timer);
         reject(err);
       };
-      byProvider.set(turnId, { resolve: safeResolve, reject: safeReject });
+      byProvider.set(turnId, { resolve: safeResolve, reject: safeReject, conversationId: opts.conversationId });
 
       timer = setTimeout(() => {
         byProvider.delete(turnId);
@@ -132,23 +163,37 @@ export class BridgeHub {
         );
       }, timeoutMs);
 
-      const command: BridgeMessage = {
-        type: "turn.request",
-        turnId,
-        provider,
-        prompt,
-      };
-      // A turn is routed to any authenticated Bridge connection for the
-      // provider; the Bridge itself picks which registered tab to use.
-      let delivered = false;
-      for (const ws of this.connections) {
-        if (ws.data.provider === provider) {
-          ws.send(JSON.stringify(command));
-          delivered = true;
-          break;
+      // Continuations go back to the connection that owns the conversation;
+      // anything else goes to any authenticated connection for the provider.
+      const route = opts.conversationId ? this.conversations.get(opts.conversationId) : undefined;
+      let target: ServerWebSocket<BridgeSocketData> | undefined;
+      if (route) {
+        if (this.connections.has(route.ws)) {
+          target = route.ws;
+        } else {
+          this.conversations.delete(opts.conversationId!);
+          byProvider.delete(turnId);
+          clearTimeout(timer);
+          safeReject(
+            Object.assign(
+              new Error(`the bridge connection for conversation "${opts.conversationId}" is gone`),
+              { code: "tab_lost" },
+            ),
+          );
+          return;
+        }
+      } else {
+        for (const ws of this.connections) {
+          if (ws.data.provider === provider) {
+            target = ws;
+            break;
+          }
+        }
+        if (target && opts.conversationId) {
+          this.conversations.set(opts.conversationId, { provider, ws: target });
         }
       }
-      if (!delivered) {
+      if (!target) {
         clearTimeout(timer);
         byProvider.delete(turnId);
         safeReject(
@@ -156,7 +201,20 @@ export class BridgeHub {
             code: "provider_unavailable",
           }),
         );
+        return;
       }
+
+      const command: BridgeMessage = {
+        type: "turn.request",
+        turnId,
+        provider,
+        prompt,
+        conversationId: opts.conversationId,
+        // The hub fills in the provider-side reference it recorded, so the
+        // Bridge can verify the tab still sits on that conversation.
+        conversationRef: route?.ref,
+      };
+      target.send(JSON.stringify(command));
     });
   }
 
@@ -194,6 +252,7 @@ export class BridgeHub {
         ws.data.provider = msg.registration.provider;
         ws.data.bridgeVersion = msg.registration.bridgeVersion;
         this.noteProvider(msg.registration.provider);
+        this.registrations.set(msg.registration.provider, msg.registration);
         const version = msg.registration.protocolVersion;
         if (version !== BRIDGE_PROTOCOL_VERSION) {
           if (Math.abs(version - BRIDGE_PROTOCOL_VERSION) <= 1) {
@@ -245,6 +304,10 @@ export class BridgeHub {
         const pending = byProvider?.get(msg.turnId);
         if (!pending) break;
         byProvider!.delete(msg.turnId);
+        if (pending.conversationId && msg.conversationRef) {
+          const route = this.conversations.get(pending.conversationId);
+          if (route) route.ref = msg.conversationRef;
+        }
         if (msg.error) {
           pending.reject(
             Object.assign(new Error(msg.error.message), {
@@ -257,6 +320,9 @@ export class BridgeHub {
             text: msg.text,
             streamSource: msg.streamSource,
             diagnostics: msg.diagnostics,
+            toolCalls: msg.toolCalls,
+            envelopeError: msg.envelopeError,
+            conversationRef: msg.conversationRef,
           });
         }
         break;
@@ -289,6 +355,9 @@ export class BridgeHub {
       },
       close(ws) {
         hub.connections.delete(ws);
+        // Conversation routes are deliberately kept: a continuation aimed at a
+        // dead connection must fail as tab_lost, which requires remembering
+        // that the conversation existed and who owned it.
       },
     };
   }

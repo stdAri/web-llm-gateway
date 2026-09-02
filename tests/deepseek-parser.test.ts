@@ -106,3 +106,48 @@ describe("createDeepSeekAssembler frame shapes", () => {
     expect(asm.done).toBe(false);
   });
 });
+
+// Ticket 03: tool envelopes are extracted from surrounding prose, never
+// whole-message matched (the experiment showed prose on every DeepSeek turn).
+import { extractToolEnvelopes } from "../src/bridge/deepseek-adapter";
+
+describe("extractToolEnvelopes", () => {
+  test("extracts one envelope out of surrounding prose", () => {
+    const out = extractToolEnvelopes(
+      '我先看一下目录。\n<tool_call nonce="7f3a9c2e" id="call_1" name="list_files">\n{"path": "."}\n</tool_call>',
+    );
+    expect(out.calls).toEqual([
+      { nonce: "7f3a9c2e", id: "call_1", name: "list_files", arguments: { path: "." } },
+    ]);
+    expect(out.text).toBe("我先看一下目录。");
+    expect(out.envelopeError).toBeUndefined();
+  });
+
+  test("extracts several back-to-back envelopes", () => {
+    const out = extractToolEnvelopes(
+      '<tool_call nonce="n" id="call_1" name="read_file">\n{"path":"a"}\n</tool_call>\n' +
+        '<tool_call nonce="n" id="call_2" name="read_file">\n{"path":"b"}\n</tool_call>',
+    );
+    expect(out.calls.length).toBe(2);
+    expect(out.calls[1]!.id).toBe("call_2");
+    expect(out.text).toBe("");
+  });
+
+  test("passes plain answers through untouched", () => {
+    const out = extractToolEnvelopes("react is ^18.3.1");
+    expect(out.calls).toEqual([]);
+    expect(out.text).toBe("react is ^18.3.1");
+  });
+
+  test("malformed JSON discards the batch and reports the error", () => {
+    const out = extractToolEnvelopes('<tool_call nonce="n" id="c" name="t">\n{bad json\n</tool_call>');
+    expect(out.calls).toEqual([]);
+    expect(out.envelopeError).toContain("malformed JSON");
+  });
+
+  test("an unclosed tag discards the batch and reports the error", () => {
+    const out = extractToolEnvelopes('text\n<tool_call nonce="n" id="c" name="t">\n{"a":1}');
+    expect(out.calls).toEqual([]);
+    expect(out.envelopeError).toContain("unclosed");
+  });
+});

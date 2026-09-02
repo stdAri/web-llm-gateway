@@ -128,3 +128,49 @@ function isFinished(frame: Record<string, unknown>): boolean {
   }
   return false;
 }
+
+/**
+ * Prompt-emulated tool envelopes (ticket 03, ADR-0012), extracted from
+ * surrounding prose — DeepSeek was observed to prepend commentary on every
+ * turn (docs/research/tool-envelope-experiment.md, T9), so whole-message
+ * matching cannot work. All-or-nothing per reply: one malformed envelope
+ * discards the batch and reports `envelopeError`, so the daemon nudges the
+ * model into re-emitting instead of forwarding half a parallel call set.
+ */
+export interface EnvelopeExtraction {
+  /** The prose with well-formed envelopes removed. */
+  text: string;
+  calls: { nonce?: string; id?: string; name?: string; arguments?: unknown }[];
+  /** A `<tool_call` opener was present but could not be parsed. */
+  envelopeError?: string;
+}
+
+export function extractToolEnvelopes(text: string): EnvelopeExtraction {
+  if (text.indexOf("<tool_call") === -1) return { text, calls: [] };
+  const re = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/g;
+  const calls: EnvelopeExtraction["calls"] = [];
+  let stripped = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    stripped += text.slice(last, m.index);
+    last = m.index + m[0].length;
+    const attrs: Record<string, string> = {};
+    const attrRe = /(\w+)="([^"]*)"/g;
+    let a: RegExpExecArray | null;
+    while ((a = attrRe.exec(m[1])) !== null) attrs[a[1]] = a[2];
+    const body = m[2].trim();
+    let args: unknown = {};
+    try {
+      args = body ? JSON.parse(body) : {};
+    } catch {
+      return { text, calls: [], envelopeError: "malformed JSON in tool_call body" };
+    }
+    calls.push({ nonce: attrs.nonce, id: attrs.id, name: attrs.name, arguments: args });
+  }
+  stripped += text.slice(last);
+  if (calls.length === 0 || stripped.indexOf("<tool_call") !== -1) {
+    return { text, calls: [], envelopeError: "unclosed tool_call tag" };
+  }
+  return { text: stripped.trim(), calls };
+}

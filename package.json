@@ -1,6 +1,6 @@
 {
   "name": "web-llm-gateway",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.0",
@@ -13,7 +13,7 @@
     "serve": "bun run src/daemon/index.ts serve",
     "dev": "bun run src/daemon/index.ts serve",
     "pair": "bun run src/daemon/index.ts pair",
-    "test": "bun test --path-ignore-patterns=reference",
+    "test": "bun test --path-ignore-patterns=**/reference/**",
     "typecheck": "tsc --noEmit",
     "build:bridge": "bun run scripts/build-bridge.ts"
   },

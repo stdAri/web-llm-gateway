@@ -22,11 +22,12 @@ import { join } from "node:path";
 
 import { type Server } from "bun";
 import { BridgeHub, type BridgeSocketData } from "./bridge-hub";
+import { ToolLoop } from "./tool-loop";
 import {
   anthropicError,
+  executeMessagesTurn,
   mapCanonicalError,
   messageEnvelope,
-  MessagesRequestError,
   parseMessagesRequest,
   synthesizedEventStream,
 } from "./messages";
@@ -40,6 +41,8 @@ export interface ServerOptions {
 
 export class GatewayHTTPServer {
   private server: Server<BridgeSocketData> | null = null;
+  /** Tool conversation state lives beside the hub, shared across requests. */
+  private readonly toolLoop = new ToolLoop();
 
   constructor(private readonly opts: ServerOptions) {}
 
@@ -91,7 +94,7 @@ export class GatewayHTTPServer {
             if (!hasGatewayKey(req, gatewayApiKey)) {
               return anthropicError(401, "authentication_error", "missing or invalid Gateway API Key");
             }
-            return handleMessages(req, hub, turnTimeoutMs);
+            return handleMessages(req, hub, this.toolLoop, turnTimeoutMs);
           }
 
           // POST /v1/turn — submit a text prompt
@@ -160,6 +163,7 @@ function hasGatewayKey(req: Request, gatewayApiKey: string): boolean {
 async function handleMessages(
   req: Request,
   hub: BridgeHub,
+  toolLoop: ToolLoop,
   turnTimeoutMs: number,
 ): Promise<Response> {
   let parsed;
@@ -193,7 +197,7 @@ async function handleMessages(
   }
 
   try {
-    const result = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs);
+    const reply = await executeMessagesTurn(hub, toolLoop, provider, parsed, turnTimeoutMs);
     if (parsed.stream) {
       // Synthesized from a complete answer, not native streaming (ticket 04
       // replaces this) — the provenance header must say so.
@@ -201,20 +205,12 @@ async function handleMessages(
       headers["cache-control"] = "no-cache";
       headers["x-gateway-stream-source"] = "buffered";
       return new Response(
-        synthesizedEventStream({
-          requestedModel: parsed.requestedModel,
-          answer: result.text,
-          prompt: parsed.prompt,
-        }),
+        synthesizedEventStream({ requestedModel: parsed.requestedModel, prompt: parsed.prompt, reply }),
         { headers },
       );
     }
     return Response.json(
-      messageEnvelope({
-        requestedModel: parsed.requestedModel,
-        answer: result.text,
-        prompt: parsed.prompt,
-      }),
+      messageEnvelope({ requestedModel: parsed.requestedModel, prompt: parsed.prompt, reply }),
       { headers },
     );
   } catch (err: unknown) {

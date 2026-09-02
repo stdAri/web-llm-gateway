@@ -457,13 +457,25 @@ function handleMessage(msg) {
 }
 
 function executeTurn(msg) {
-  const { turnId, provider, prompt } = msg;
+  const { turnId, provider, prompt, conversationRef } = msg;
   if (provider !== PROVIDER) {
     ws.send(JSON.stringify({ type: 'turn.reject', turnId, provider, reason: 'unknown provider: ' + provider }));
     return;
   }
   if (!isDeepSeekPage()) {
     ws.send(JSON.stringify({ type: 'turn.reject', turnId, provider, reason: 'not on chat.deepseek.com' }));
+    return;
+  }
+  // A continuation must land in the same web conversation the earlier turns
+  // ran in; if the Developer User navigated the tab away, say so instead of
+  // posting tool results into an unrelated conversation.
+  if (conversationRef && location.href !== conversationRef) {
+    ws.send(JSON.stringify({
+      type: 'turn.reject',
+      turnId,
+      provider,
+      reason: 'tab is on ' + location.href + ', not the conversation it is asked to continue (' + conversationRef + ')'
+    }));
     return;
   }
 
@@ -513,13 +525,27 @@ function executeTurn(msg) {
       } else if (!text) {
         error = { code: 'no_stream_captured', message: 'prompt was submitted but no completion stream was captured' };
       }
+      // Tool envelopes are extracted in the page (ADR-0012); the daemon
+      // revalidates every call before anything reaches an Agent Client.
+      let answerText = text;
+      let toolCalls;
+      let envelopeError;
+      if (!error && text) {
+        const extraction = extractToolEnvelopes(text);
+        answerText = extraction.text;
+        if (extraction.calls.length > 0) toolCalls = extraction.calls;
+        envelopeError = extraction.envelopeError;
+      }
       ws.send(JSON.stringify({
         type: 'turn.result',
         turnId,
         provider: PROVIDER,
-        text: text || '(no answer received)',
+        text: answerText || (toolCalls ? '' : '(no answer received)'),
         streamSource: 'network',
         error,
+        toolCalls,
+        envelopeError,
+        conversationRef: location.href,
         diagnostics
       }));
       setStatus('connected');
