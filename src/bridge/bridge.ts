@@ -112,13 +112,23 @@ export function pageInterceptorSource(): string {
 }
 
 /** Build the userscript metadata block and bootstrap script. */
-export function buildUserscript(config: BridgeConfig): string {
+export function buildUserscript(
+  config: BridgeConfig,
+  meta: { version: string; updateUrl?: string },
+): string {
+  // Tampermonkey and Greasyfork only push updates when @version increases, so
+  // the version is injected from package.json at build time — bump it whenever
+  // the Bridge changes. @downloadURL/@updateURL point at the canonical raw
+  // artifact so installs track the repository (or a Greasyfork sync of it).
+  const updateLines = meta.updateUrl
+    ? `// @downloadURL  ${meta.updateUrl}\n// @updateURL    ${meta.updateUrl}\n`
+    : "";
   return `// ==UserScript==
 // @name         Web LLM Gateway Bridge
 // @namespace    web-llm-gateway
-// @version      0.1.0
+// @version      ${meta.version}
 // @description  Registers Web Product tabs and executes turns against real web conversations.
-// @match        https://chat.deepseek.com/*
+${updateLines}// @match        https://chat.deepseek.com/*
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
 // ==/UserScript==
@@ -316,6 +326,6 @@ connect();
 
 /** Run the bridge directly when executed in a test host (bun). */
 export function startBridge(config: BridgeConfig) {
-  const meta = buildUserscript(config);
+  const meta = buildUserscript(config, { version: "0.0.0-test" });
   return { meta, config };
 }

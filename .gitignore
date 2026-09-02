@@ -1,5 +1,8 @@
 node_modules/
-dist/
+dist/*
+# The built userscript is the distribution artifact — Tampermonkey/Greasyfork
+# update from its raw URL, so it is committed.
+!dist/bridge.user.js
 .gateway/
 *.log
 

@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stdAri/web-llm-gateway"
+  },
   "description": "Local Gateway Node presenting standard model protocols to Agent Clients while using authenticated consumer AI Web Products as upstream backends.",
   "scripts": {
     "serve": "bun run src/daemon/index.ts serve",
