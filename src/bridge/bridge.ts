@@ -509,6 +509,56 @@ function ensureModelSelected(wanted, done) {
   }, 150);
 }
 
+/**
+ * Put one per-message toggle into the wanted state before submitting.
+ *
+ * Same hazard as the mode radios: the click is asynchronous, so this waits for
+ * the control to actually move. Reporting an effort the page did not apply is
+ * the same substitution as reporting a model it did not run.
+ */
+function ensureToggle(label, wanted, done) {
+  const control = findToggle(label);
+  if (!control) {
+    // Nothing to turn off is not a failure; nothing to turn on is.
+    if (!wanted) { done(true); return; }
+    done(false, 'the page has no "' + label + '" control to enable');
+    return;
+  }
+  if (toggleIsOn(control) === wanted) { done(true); return; }
+  control.click();
+
+  const deadline = Date.now() + 5000;
+  const check = setInterval(function () {
+    if (toggleIsOn(control) === wanted) {
+      clearInterval(check);
+      done(true);
+      return;
+    }
+    if (Date.now() > deadline) {
+      clearInterval(check);
+      done(false, 'clicked "' + label + '" but the page did not switch it ' + (wanted ? 'on' : 'off'));
+    }
+  }, 150);
+}
+
+function findToggle(label) {
+  try {
+    const spans = Array.from(document.querySelectorAll('span'));
+    for (const span of spans) {
+      if ((span.textContent || '').trim() !== label) continue;
+      const control = span.closest(${JSON.stringify(DEEPSEEK.toggleButtonSelector)});
+      if (control) return control;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function toggleIsOn(control) {
+  const pressed = control.getAttribute('aria-pressed');
+  if (pressed !== null) return pressed === 'true';
+  return (control.className || '').toString().indexOf(${JSON.stringify(DEEPSEEK.toggleOnClass)}) !== -1;
+}
+
 function registerMenu() {
   if (typeof GM_registerMenuCommand !== 'function') return;
   GM_registerMenuCommand('Pair with Gateway Node...', function () {
@@ -640,7 +690,7 @@ function handleMessage(msg) {
 }
 
 function executeTurn(msg) {
-  const { turnId, provider, prompt, conversationRef, model } = msg;
+  const { turnId, provider, prompt, conversationRef, model, effort } = msg;
   if (provider !== PROVIDER) {
     ws.send(JSON.stringify({ type: 'turn.reject', turnId, provider, reason: 'unknown provider: ' + provider }));
     return;
@@ -782,7 +832,19 @@ function executeTurn(msg) {
       return;
     }
     diagnostics.model = model || undefined;
-    submitPrompt(prompt, diagnostics);
+    // Effort is a separate axis from the model: a per-message toggle rather
+    // than a property of the conversation. Absent effort means explicitly off,
+    // not "leave whatever the page happens to have", so a turn is reproducible.
+    const wantEffort = effort === ${JSON.stringify(DEEPSEEK.effortToggleLabel)};
+    ensureToggle(${JSON.stringify(DEEPSEEK.effortToggleLabel)}, wantEffort, function (ok2, reason2) {
+      if (!ok2) {
+        modelError = { code: 'effort_not_honoured', message: reason2 };
+        finish({ cancelled: false });
+        return;
+      }
+      diagnostics.effort = effort || undefined;
+      submitPrompt(prompt, diagnostics);
+    });
   });
 }
 

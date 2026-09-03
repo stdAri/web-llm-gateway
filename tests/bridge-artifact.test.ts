@@ -57,6 +57,10 @@ function runArtifact(
     sendButtonLabel?: string | null;
     /** Mimics DeepSeek: an icon-only control with no aria-label. */
     sendButtonClass?: string;
+    /** Starting state of the effort toggle. */
+    toggleOn?: boolean;
+    /** Set false to model a page with no effort control at all. */
+    hasToggle?: boolean;
   } = {},
 ) {
   const created: StubEl[] = [];
@@ -90,6 +94,20 @@ function runArtifact(
   const timeouts: { fn: () => void; ms: number }[] = [];
   const listeners: Record<string, ((e: unknown) => void)[]> = {};
   const clicked: string[] = [];
+  // A stand-in for DeepSeek's 深度思考 control: a toggle wrapping its label.
+  const toggle = {
+    pressed: opts.toggleOn ?? false,
+    className: "",
+    getAttribute: (k: string) => (k === "aria-pressed" ? String(toggle.pressed) : null),
+    click: () => {
+      clicked.push("toggle");
+      toggle.pressed = !toggle.pressed;
+    },
+  };
+  const toggleLabelSpan = {
+    textContent: "深度思考",
+    closest: (sel: string) => (sel.includes("toggle") ? toggle : null),
+  };
   const sendButton =
     opts.sendButtonLabel === null && opts.sendButtonClass === undefined
       ? null
@@ -119,7 +137,10 @@ function runArtifact(
         if (sel.includes("ds-button--primary")) return selectorMatches ? sendButton : null;
         return null;
       },
-      querySelectorAll: () => (sendButton && opts.sendButtonLabel ? [sendButton] : []),
+      querySelectorAll: (sel: string) => {
+        if (sel === "span") return opts.hasToggle === false ? [] : [toggleLabelSpan];
+        return sendButton && opts.sendButtonLabel ? [sendButton] : [];
+      },
       addEventListener() {},
     },
     Event: class {
@@ -187,6 +208,7 @@ function runArtifact(
     promptCount: () => promptCount,
     intervals,
     clicked,
+    toggle,
     /** The Bridge defers the send click; nothing clicks it in a stub browser. */
     flushTimeouts: () => {
       const pending = timeouts.splice(0);
@@ -490,5 +512,72 @@ describe("bridge userscript artifact — finding DeepSeek's send control", () =>
   test("still honours an aria-label when a provider offers one", () => {
     const { h } = runTurn({ sendButtonLabel: "Send message" });
     expect(h.clicked).toEqual(["send"]);
+  });
+});
+
+describe("bridge userscript artifact — effort is set, not just reported", () => {
+  /** Dispatches a turn and lets every deferred callback run. */
+  function turnWith(opts: {
+    effort?: string;
+    toggleOn?: boolean;
+    hasToggle?: boolean;
+  }) {
+    const h = runArtifact({
+      storedToken: "bp_stored",
+      sendButtonLabel: "Send message",
+      toggleOn: opts.toggleOn,
+      hasToggle: opts.hasToggle,
+    });
+    h.sockets[0]!.onopen!();
+    h.sockets[0]!.onmessage!({
+      data: JSON.stringify({
+        type: "turn.request",
+        turnId: "t_effort",
+        provider: "deepseek",
+        prompt: "hi",
+        effort: opts.effort,
+      }),
+    });
+    // Model selection and the toggle each settle through an interval.
+    for (const i of h.intervals.filter((x) => x.ms === 150)) i.fn();
+    h.flushTimeouts();
+    return h;
+  }
+
+  test("turns the control on when effort is requested", () => {
+    const h = turnWith({ effort: "深度思考", toggleOn: false });
+    expect(h.toggle.pressed).toBe(true);
+  });
+
+  test("turns the control off when no effort is requested", () => {
+    // Absent effort means off, not "whatever the page happened to have" —
+    // otherwise the same request gives different answers on different tabs.
+    const h = turnWith({ toggleOn: true });
+    expect(h.toggle.pressed).toBe(false);
+  });
+
+  test("leaves an already-correct control alone", () => {
+    const h = turnWith({ effort: "深度思考", toggleOn: true });
+    expect(h.toggle.pressed).toBe(true);
+    expect(h.clicked).not.toContain("toggle");
+  });
+
+  test("a page with no effort control is fine when none was asked for", () => {
+    const h = turnWith({ hasToggle: false });
+    expect(h.clicked).toContain("send");
+  });
+
+  test("but refuses to claim effort a page cannot provide", () => {
+    const h = turnWith({ effort: "深度思考", hasToggle: false });
+    const realNow = Date.now;
+    Date.now = () => realNow() + 200_000;
+    try {
+      h.intervals.find((i) => i.ms === 400)!.fn();
+    } finally {
+      Date.now = realNow;
+    }
+    const result = h.sent().find((m) => m.type === "turn.result")!;
+    expect((result.error as { code: string }).code).toBe("effort_not_honoured");
+    expect(h.clicked).not.toContain("send");
   });
 });

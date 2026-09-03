@@ -233,8 +233,30 @@ async function handleMessages(
     }
   }
 
+  // Effort maps onto an option the site genuinely exposes for this model, and
+  // is never prompt-simulated (ADR-0013). A client asking for thinking on a
+  // model that exposes none is told so rather than quietly answered without it.
+  let effort: string | undefined;
+  if (parsed.thinkingRequested) {
+    const exposed = catalog?.models.find(
+      (m) => m.displayName === (selectedModel ?? catalog?.selectedModel),
+    )?.effort;
+    effort = exposed?.[0];
+    if (!effort) {
+      const { status, type } = mapCanonicalError("effort_not_honoured");
+      return anthropicError(
+        status,
+        type,
+        `extended thinking was requested but ${provider} exposes no effort option for ` +
+          `"${selectedModel ?? catalog?.selectedModel ?? "the selected model"}"`,
+      );
+    }
+  }
+
   const headers: Record<string, string> = {
     "x-gateway-provider": provider,
+    // Which exposed option served as effort, so the answer is attributable.
+    "x-gateway-effort": encodeURIComponent(effort ?? "(none)"),
     // What actually served the turn, whether or not the client named it.
     //
     // Percent-encoded because header values must be ASCII and these names are
@@ -265,6 +287,7 @@ async function handleMessages(
         turnTimeoutMs,
         req.signal,
         selectedModel,
+        effort,
       );
       headers["content-type"] = "text/event-stream; charset=utf-8";
       headers["cache-control"] = "no-cache";
@@ -292,6 +315,7 @@ async function handleMessages(
       turnTimeoutMs,
       req.signal,
       selectedModel,
+      effort,
     );
     if (parsed.stream) {
       // Tool turns: synthesized from a complete, validated answer — the

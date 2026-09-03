@@ -38,7 +38,18 @@ import { ToolLoop, ToolProtocolError, type ToolSpec, type ValidatedCall } from "
 import type { BridgeHub, TurnDelta, TurnOutcome } from "./bridge-hub";
 
 /** Request fields this adapter actually honours. */
-const HONOURED_FIELDS = new Set(["model", "messages", "system", "stream", "tools", "tool_choice"]);
+const HONOURED_FIELDS = new Set([
+  "model",
+  "messages",
+  "system",
+  "stream",
+  "tools",
+  "tool_choice",
+  // `thinking` is honoured as of ticket 06's effort work: it maps onto the
+  // effort toggle the site genuinely exposes, rather than being reported as a
+  // field the release drops.
+  "thinking",
+]);
 
 export interface ToolResultBlock {
   toolUseId: string;
@@ -59,8 +70,26 @@ export interface ParsedMessagesRequest {
   /** Tool results answering our earlier tool_use blocks; set when the last
    * user message consists of tool_result content. */
   toolResults?: ToolResultBlock[];
+  /**
+   * Whether the client asked for extended thinking. Mapped onto the effort
+   * option the Web Product exposes; the daemon never simulates a level the
+   * site does not have.
+   */
+  thinkingRequested: boolean;
   /** Top-level request fields present but not honoured by this release. */
   unhonouredFields: string[];
+}
+
+function describeTools(tools: ToolSpec[] | undefined): string {
+  if (!tools || tools.length === 0) return "none";
+  const shown = tools.slice(0, 5).map((t) => t.name).join(",");
+  return tools.length <= 5 ? `${tools.length}[${shown}]` : `${tools.length}[${shown},…]`;
+}
+
+/** Anthropic sends `thinking: { type: "enabled" | "disabled", ... }`. */
+function isThinkingEnabled(thinking: unknown): boolean {
+  if (thinking === null || typeof thinking !== "object") return false;
+  return (thinking as { type?: unknown }).type === "enabled";
 }
 
 export class MessagesRequestError extends Error {
@@ -102,7 +131,11 @@ export function parseMessagesRequest(body: unknown): ParsedMessagesRequest {
           return `${role}[${blocks}]`;
         })
         .join(" ") +
-      ` toolResults=${toolResults ? toolResults.length : "no"}`,
+      ` toolResults=${toolResults ? toolResults.length : "no"}` +
+      // Whether the client offered tools is the first thing to check when a
+      // tool loop does not engage, and it was invisible here. Truncated because
+      // a real Claude Code session offers well over a hundred.
+      ` tools=${describeTools(tools)}`,
   );
 
   const notes: string[] = [];
@@ -135,6 +168,7 @@ export function parseMessagesRequest(body: unknown): ParsedMessagesRequest {
     stream: req.stream === true,
     tools,
     toolResults,
+    thinkingRequested: isThinkingEnabled(req.thinking),
     unhonouredFields,
   };
 }
@@ -290,6 +324,7 @@ export async function executeMessagesTurn(
   turnTimeoutMs: number,
   signal?: AbortSignal,
   model?: string,
+  effort?: string,
 ): Promise<TurnReply> {
   let prompt: string;
   let conv;
@@ -319,7 +354,7 @@ export async function executeMessagesTurn(
     prompt = toolLoop.buildSetupPrompt(conv, parsed.prompt);
   } else {
     // No tools: the ticket 01/02 path, with reasoning split out (ticket 04).
-    const outcome = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs, { signal, model });
+    const outcome = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs, { signal, model, effort });
     return plainReply(outcome);
   }
 
@@ -328,6 +363,7 @@ export async function executeMessagesTurn(
       conversationId: conv.id,
       signal,
       model,
+      effort,
     });
     // Cancelling has to end the loop, not just the round: another round would
     // start the Web Product generating again right after it was stopped.
@@ -395,6 +431,7 @@ export function executeMessagesTurnStreaming(
   turnTimeoutMs: number,
   signal?: AbortSignal,
   model?: string,
+  effort?: string,
 ): Promise<StreamReadiness> {
   const encoder = new TextEncoder();
   const id = `msg_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -500,7 +537,7 @@ export function executeMessagesTurnStreaming(
   };
 
   hub
-    .submitTurn(provider, parsed.prompt, turnTimeoutMs, { onDelta, signal, model })
+    .submitTurn(provider, parsed.prompt, turnTimeoutMs, { onDelta, signal, model, effort })
     .then((outcome) => {
       if (!started) {
         resolveReady({ provenance: "buffered", reply: plainReply(outcome) });

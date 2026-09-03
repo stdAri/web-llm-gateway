@@ -60,6 +60,14 @@ export const DEEPSEEK = {
    */
   effortToggleLabel: "深度思考",
   webSearchToggleLabel: "智能搜索",
+  /**
+   * The per-message toggles. Verified live: the control is a
+   * `div.ds-toggle-button` wrapping the label, carrying `aria-pressed` and
+   * mirroring it in a `--select` class. Both signals agree, so the attribute is
+   * read first and the class is a fallback if DeepSeek drops the attribute.
+   */
+  toggleButtonSelector: ".ds-toggle-button",
+  toggleOnClass: "ds-toggle-button--select",
 } as const;
 
 /**

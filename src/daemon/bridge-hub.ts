@@ -171,6 +171,8 @@ export class BridgeHub {
       conversationRef?: string;
       /** The site's own model name; the Bridge selects it before submitting. */
       model?: string;
+      /** The site's own effort label to enable, or absent for off. */
+      effort?: string;
       onDelta?: (delta: TurnDelta) => void;
       /** Aborting stops generation in the Web Product, not just this stream. */
       signal?: AbortSignal;
@@ -309,6 +311,7 @@ export class BridgeHub {
         provider,
         prompt,
         model: opts.model,
+        effort: opts.effort,
         conversationId: opts.conversationId,
         // The hub fills in the provider-side reference it recorded, so the
         // Bridge can verify the tab still sits on that conversation.

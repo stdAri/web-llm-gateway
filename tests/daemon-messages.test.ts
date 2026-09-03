@@ -193,9 +193,12 @@ describe("POST /v1/messages — what Claude Code sends", () => {
     const bridge = await connectFakeBridge(`ws://127.0.0.1:${port}/bridge`, DEEPSEEK_PROVIDER, "pong");
     const res = await postMessages(port, claudeCodeRequest());
     const unhonoured = res.headers.get("x-gateway-unhonoured-fields") ?? "";
-    for (const field of ["max_tokens", "metadata", "thinking"]) {
+    for (const field of ["max_tokens", "metadata"]) {
       expect(unhonoured).toContain(field);
     }
+    // `thinking` is honoured now: it maps onto the effort option the site
+    // exposes, so it must not be reported as a dropped field.
+    expect(unhonoured).not.toContain("thinking");
     // tools and tool_choice are honoured since ticket 03 — they must no
     // longer appear in this report.
     const listed = unhonoured.split(",");

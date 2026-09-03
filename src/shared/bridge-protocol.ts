@@ -122,6 +122,9 @@ export type BridgeMessage =
       /** The site's own model name to run this turn with. The Bridge selects it
        * on the page before submitting, or refuses the turn if it cannot. */
       model?: string;
+      /** The site's own effort label to enable for this turn (DeepSeek:
+       * 深度思考). Absent means explicitly off rather than "leave as-is". */
+      effort?: string;
       /** Daemon-issued conversation handle. Present = continue that web
        * conversation; absent = start a fresh one. */
       conversationId?: string;
