@@ -15,7 +15,7 @@ import {
   isBridgeMessage,
   type ParsedToolCall,
 } from "../shared/bridge-protocol";
-import type { ProviderRegistration } from "../shared/canonical";
+import type { CatalogModel, ModelSwitching, ProviderRegistration } from "../shared/canonical";
 
 export interface RegisteredTab {
   tabId: string;
@@ -40,6 +40,8 @@ export interface TurnDelta {
 }
 
 export interface TurnOutcome {
+  /** What the Web Product reported as actually serving the turn. */
+  provenance?: Record<string, unknown>;
   /** The turn was stopped deliberately; `text` holds whatever arrived first. */
   cancelled?: boolean;
   text: string;
@@ -59,6 +61,16 @@ interface ConversationRoute {
   ref?: string;
 }
 
+/** A provider's catalog as last reported by a Bridge, with its own freshness. */
+export interface ProviderCatalog {
+  provider: string;
+  models: CatalogModel[];
+  modelSwitching: ModelSwitching;
+  selectedModel?: string;
+  /** Epoch ms the Bridge read this off the page; undefined if it never could. */
+  observedAt?: number;
+}
+
 export interface BridgeSocketData {
   tokenPresented?: boolean;
   provider?: string;
@@ -71,6 +83,8 @@ export class BridgeHub {
   /** provider -> map of turnId -> pending turn */
   private pendingTurns = new Map<string, Map<string, PendingTurn>>();
   private connections = new Set<ServerWebSocket<BridgeSocketData>>();
+  /** provider -> the catalog the Bridge reported. */
+  private catalogs = new Map<string, ProviderCatalog>();
   private providerOrder: string[] = [];
   /** provider -> registration announced at hello (capabilities included, so
    * the honest `tools: prompt-emulated` report is observable). */
@@ -115,6 +129,15 @@ export class BridgeHub {
     });
   }
 
+  /** The catalog a Bridge reported for one provider, if any. */
+  catalog(provider: string): ProviderCatalog | undefined {
+    return this.catalogs.get(provider);
+  }
+
+  catalogsView(): ProviderCatalog[] {
+    return [...this.catalogs.values()];
+  }
+
   tabCount(provider: string): number {
     return this.tabs.get(provider)?.size ?? 0;
   }
@@ -146,6 +169,8 @@ export class BridgeHub {
     opts: {
       conversationId?: string;
       conversationRef?: string;
+      /** The site's own model name; the Bridge selects it before submitting. */
+      model?: string;
       onDelta?: (delta: TurnDelta) => void;
       /** Aborting stops generation in the Web Product, not just this stream. */
       signal?: AbortSignal;
@@ -283,6 +308,7 @@ export class BridgeHub {
         turnId,
         provider,
         prompt,
+        model: opts.model,
         conversationId: opts.conversationId,
         // The hub fills in the provider-side reference it recorded, so the
         // Bridge can verify the tab still sits on that conversation.
@@ -329,6 +355,16 @@ export class BridgeHub {
         ws.data.tokenPresented = true;
         ws.data.provider = msg.registration.provider;
         ws.data.bridgeVersion = msg.registration.bridgeVersion;
+        this.catalogs.set(msg.registration.provider, {
+          provider: msg.registration.provider,
+          models: msg.registration.models ?? [],
+          // A Bridge that predates catalog discovery must not be assumed to
+          // support switching; "none" keeps the daemon from offering choices
+          // it cannot honour.
+          modelSwitching: msg.registration.modelSwitching ?? "none",
+          selectedModel: msg.registration.selectedModel,
+          observedAt: msg.registration.catalogObservedAt,
+        });
         this.noteProvider(msg.registration.provider);
         this.registrations.set(msg.registration.provider, msg.registration);
         const version = msg.registration.protocolVersion;
@@ -358,6 +394,18 @@ export class BridgeHub {
             } satisfies BridgeMessage),
           );
         }
+        break;
+      }
+      case "bridge.catalog": {
+        if (!ws.data.tokenPresented) break;
+        const existing = this.catalogs.get(msg.provider);
+        this.catalogs.set(msg.provider, {
+          provider: msg.provider,
+          models: msg.models,
+          modelSwitching: existing?.modelSwitching ?? "none",
+          selectedModel: msg.selectedModel,
+          observedAt: msg.observedAt,
+        });
         break;
       }
       case "tab.registered": {
@@ -406,6 +454,7 @@ export class BridgeHub {
         } else {
           pending.resolve({
             cancelled: msg.cancelled,
+            provenance: msg.provenance,
             text: msg.text,
             reasoning: msg.reasoning,
             streamSource: msg.streamSource,

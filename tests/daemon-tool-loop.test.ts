@@ -13,7 +13,13 @@ function registration(provider = DEEPSEEK_PROVIDER): ProviderRegistration {
   return {
     provider,
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
-    models: [{ id: "deepseek-chat", displayName: "DeepSeek Chat" }],
+    models: [
+      { id: "快速模式", displayName: "快速模式", effort: ["深度思考"] },
+      { id: "专家模式", displayName: "专家模式", effort: ["深度思考"] },
+    ],
+    modelSwitching: "at-conversation-start" as const,
+    catalogObservedAt: Date.now(),
+    selectedModel: "快速模式",
     capabilities: {
       streaming: true,
       streamSource: "network",
@@ -103,7 +109,7 @@ const TOOLS = [
 
 function toolTaskRequest(overrides: Record<string, unknown> = {}) {
   return {
-    model: "deepseek/deepseek-chat",
+    model: "deepseek/快速模式",
     max_tokens: 8000,
     messages: [{ role: "user", content: "Which react version does package.json declare?" }],
     tools: TOOLS,

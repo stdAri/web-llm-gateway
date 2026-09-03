@@ -43,6 +43,23 @@ export const DEEPSEEK = {
   stopButtonSelector: 'div[role="button"].ds-button--primary.ds-button--filled',
   /** Present on the control while it refuses to submit or stop. */
   disabledClass: "ds-button--disabled",
+  /**
+   * The mode radios (快速模式 / 专家模式 / 识图模式) that choose the model.
+   *
+   * Verified live: these exist only on the new-chat screen. Once a conversation
+   * has started they are gone from the DOM entirely, which is why DeepSeek is
+   * `at-conversation-start` rather than `mid-conversation`.
+   */
+  modeRadioSelector: 'div[role="radio"]',
+  /** Extra class carried by the currently selected mode radio. */
+  modeSelectedClass: "_31a22b0",
+  /**
+   * Per-message toggles, present inside a conversation. These are a different
+   * axis from the model: 深度思考 is the effort the site exposes, and 智能搜索
+   * is a capability, so neither is folded into a model name.
+   */
+  effortToggleLabel: "深度思考",
+  webSearchToggleLabel: "智能搜索",
 } as const;
 
 /**
@@ -198,4 +215,49 @@ export function extractToolEnvelopes(text: string): EnvelopeExtraction {
     return { text, calls: [], envelopeError: "unclosed tool_call tag" };
   }
   return { text: stripped.trim(), calls };
+}
+
+/**
+ * What the stream says actually served the turn.
+ *
+ * DeepSeek reports this itself in the first frames — `model_type` alongside the
+ * message ids, then `thinking_enabled` / `search_enabled` / `conversation_mode`
+ * inside the first response snapshot. It is page-sourced evidence rather than a
+ * daemon-side assumption, which is what lets "no request is served by a
+ * different model or effort than the one selected" be checked instead of merely
+ * promised (ADR-0013).
+ */
+export interface DeepSeekProvenance {
+  modelType?: string;
+  conversationMode?: string;
+  thinkingEnabled?: boolean;
+  searchEnabled?: boolean;
+}
+
+/** Fold one frame's provenance into an accumulator, ignoring frames without. */
+export function readFrameProvenance(
+  payload: unknown,
+  into: DeepSeekProvenance,
+): DeepSeekProvenance {
+  if (payload === null || typeof payload !== "object") return into;
+  const frame = payload as Record<string, unknown>;
+
+  if (typeof frame.model_type === "string") into.modelType = frame.model_type;
+
+  const v = frame.v;
+  if (v && typeof v === "object" && !Array.isArray(v) && "response" in v) {
+    const response = (v as { response?: Record<string, unknown> }).response;
+    if (response) {
+      if (typeof response.conversation_mode === "string") {
+        into.conversationMode = response.conversation_mode;
+      }
+      if (typeof response.thinking_enabled === "boolean") {
+        into.thinkingEnabled = response.thinking_enabled;
+      }
+      if (typeof response.search_enabled === "boolean") {
+        into.searchEnabled = response.search_enabled;
+      }
+    }
+  }
+  return into;
 }

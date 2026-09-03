@@ -289,6 +289,7 @@ export async function executeMessagesTurn(
   parsed: ParsedMessagesRequest,
   turnTimeoutMs: number,
   signal?: AbortSignal,
+  model?: string,
 ): Promise<TurnReply> {
   let prompt: string;
   let conv;
@@ -318,7 +319,7 @@ export async function executeMessagesTurn(
     prompt = toolLoop.buildSetupPrompt(conv, parsed.prompt);
   } else {
     // No tools: the ticket 01/02 path, with reasoning split out (ticket 04).
-    const outcome = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs, { signal });
+    const outcome = await hub.submitTurn(provider, parsed.prompt, turnTimeoutMs, { signal, model });
     return plainReply(outcome);
   }
 
@@ -326,6 +327,7 @@ export async function executeMessagesTurn(
     const outcome = await hub.submitTurn(provider, prompt, turnTimeoutMs, {
       conversationId: conv.id,
       signal,
+      model,
     });
     // Cancelling has to end the loop, not just the round: another round would
     // start the Web Product generating again right after it was stopped.
@@ -392,6 +394,7 @@ export function executeMessagesTurnStreaming(
   parsed: ParsedMessagesRequest,
   turnTimeoutMs: number,
   signal?: AbortSignal,
+  model?: string,
 ): Promise<StreamReadiness> {
   const encoder = new TextEncoder();
   const id = `msg_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -497,7 +500,7 @@ export function executeMessagesTurnStreaming(
   };
 
   hub
-    .submitTurn(provider, parsed.prompt, turnTimeoutMs, { onDelta, signal })
+    .submitTurn(provider, parsed.prompt, turnTimeoutMs, { onDelta, signal, model })
     .then((outcome) => {
       if (!started) {
         resolveReady({ provenance: "buffered", reply: plainReply(outcome) });
@@ -667,6 +670,13 @@ export function mapCanonicalError(code: string): { status: number; type: string 
       return { status: 400, type: "invalid_request_error" };
     case "model_unavailable":
       return { status: 404, type: "not_found_error" };
+    case "catalog_unavailable":
+      // Not "the model does not exist" -- the daemon has not been able to look.
+      return { status: 503, type: "overloaded_error" };
+    case "model_switch_unavailable":
+    case "effort_not_honoured":
+      // The request is coherent but this site cannot honour it as asked.
+      return { status: 409, type: "invalid_request_error" };
     case "provider_unavailable":
     case "provider_busy":
       return { status: 503, type: "overloaded_error" };

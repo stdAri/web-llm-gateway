@@ -22,6 +22,7 @@ import { join } from "node:path";
 
 import { type Server } from "bun";
 import { BridgeHub, type BridgeSocketData } from "./bridge-hub";
+import { listCatalog, resolveSelection, SelectionError } from "./catalog";
 import { ToolLoop } from "./tool-loop";
 import {
   anthropicError,
@@ -78,6 +79,27 @@ export class GatewayHTTPServer {
           // GET / — health check listing declared providers
           if (url.pathname === "/" && req.method === "GET") {
             return Response.json({ ok: true, providers: hub.listProviders() });
+          }
+
+          // GET /v1/models — the catalog the account can actually reach, with
+          // each entry's freshness rather than a silent claim of currency.
+          if (url.pathname === "/v1/models" && req.method === "GET") {
+            if (!hasGatewayKey(req, gatewayApiKey)) {
+              return anthropicError(401, "authentication_error", "missing or invalid Gateway API Key");
+            }
+            const entries = listCatalog(hub.catalogsView());
+            return Response.json({
+              object: "list",
+              data: entries.map((e) => ({
+                id: e.id,
+                object: "model",
+                display_name: e.displayName,
+                provider: e.provider,
+                effort: e.effort,
+                fresh: e.fresh,
+                observed_at: e.observedAt ?? null,
+              })),
+            });
           }
 
           // GET /bridge.user.js — install and update the Bridge from the
@@ -191,8 +213,37 @@ async function handleMessages(
     );
   }
 
+  // Model selection, fail-closed (ADR-0013).
+  //
+  // Only a qualified `provider/model` is a *selection* of a web model. Claude
+  // Code sends its own model names, which say nothing about which web model the
+  // Developer User wants; rejecting those would break every unqualified client
+  // for no honesty gained. Those turns are served by whatever the Web Product
+  // currently has selected, and the response header says which so the answer is
+  // still attributable.
+  let selectedModel: string | undefined;
+  const catalog = hub.catalog(provider);
+  if (parsed.providerPrefix) {
+    try {
+      selectedModel = resolveSelection(parsed.requestedModel, catalog).displayName;
+    } catch (err) {
+      const e = err as SelectionError;
+      const { status, type } = mapCanonicalError(e.code ?? "model_unavailable");
+      return anthropicError(status, type, e.message);
+    }
+  }
+
   const headers: Record<string, string> = {
     "x-gateway-provider": provider,
+    // What actually served the turn, whether or not the client named it.
+    //
+    // Percent-encoded because header values must be ASCII and these names are
+    // the site's own — "快速模式", not a slug. Keeping the display name is the
+    // point (no renaming table), so the encoding lives here rather than the
+    // name being anglicised at the source.
+    "x-gateway-model": encodeURIComponent(
+      selectedModel ?? catalog?.selectedModel ?? "(unreported)",
+    ),
     // Web products report no accounting; every usage figure is a
     // length-based estimate and must be flagged as such (ticket 04).
     "x-gateway-usage": "estimated",
@@ -213,6 +264,7 @@ async function handleMessages(
         parsed,
         turnTimeoutMs,
         req.signal,
+        selectedModel,
       );
       headers["content-type"] = "text/event-stream; charset=utf-8";
       headers["cache-control"] = "no-cache";
@@ -239,6 +291,7 @@ async function handleMessages(
       parsed,
       turnTimeoutMs,
       req.signal,
+      selectedModel,
     );
     if (parsed.stream) {
       // Tool turns: synthesized from a complete, validated answer — the
@@ -268,18 +321,29 @@ async function handleTurn(
   turnTimeoutMs: number,
 ): Promise<Response> {
   try {
-    const body = (await req.json()) as { provider?: string; prompt?: unknown };
+    const body = (await req.json()) as { provider?: string; prompt?: unknown; model?: unknown };
     const provider = body.provider ?? "deepseek";
     const prompt = body.prompt;
     if (!prompt || typeof prompt !== "string") {
       return Response.json({ error: { code: "invalid_request", message: "missing or invalid 'prompt' field" } }, { status: 400 });
     }
-    const result = await hub.submitTurn(provider, prompt, turnTimeoutMs, { signal: req.signal });
+    // A qualified `provider/model` is a selection here too; ignoring it would
+    // run the turn on whatever the page happens to have chosen.
+    let model: string | undefined;
+    const requested = typeof body.model === "string" ? body.model : undefined;
+    if (requested && requested.includes("/")) {
+      model = resolveSelection(requested, hub.catalog(provider)).displayName;
+    }
+    const result = await hub.submitTurn(provider, prompt, turnTimeoutMs, {
+      signal: req.signal,
+      model,
+    });
     return Response.json({
       provider,
       text: result.text,
       reasoning: result.reasoning,
       cancelled: result.cancelled,
+      provenance: result.provenance,
       streamSource: result.streamSource,
       diagnostics: result.diagnostics,
     });

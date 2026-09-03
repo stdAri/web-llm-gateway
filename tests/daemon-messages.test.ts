@@ -16,7 +16,13 @@ function registration(provider = DEEPSEEK_PROVIDER): ProviderRegistration {
   return {
     provider,
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
-    models: [{ id: "deepseek-chat", displayName: "DeepSeek Chat" }],
+    models: [
+      { id: "快速模式", displayName: "快速模式", effort: ["深度思考"] },
+      { id: "专家模式", displayName: "专家模式", effort: ["深度思考"] },
+    ],
+    modelSwitching: "at-conversation-start" as const,
+    catalogObservedAt: Date.now(),
+    selectedModel: "快速模式",
     capabilities: {
       streaming: true,
       streamSource: "network",
@@ -84,7 +90,7 @@ afterEach(() => {
 /** The body and headers Claude Code 2.x actually sends to /v1/messages. */
 function claudeCodeRequest(overrides: Record<string, unknown> = {}) {
   return {
-    model: "deepseek/deepseek-chat",
+    model: "deepseek/快速模式",
     max_tokens: 32000,
     stream: false,
     system: [
@@ -169,7 +175,7 @@ describe("POST /v1/messages — what Claude Code sends", () => {
     };
     expect(body.type).toBe("message");
     expect(body.role).toBe("assistant");
-    expect(body.model).toBe("deepseek/deepseek-chat");
+    expect(body.model).toBe("deepseek/快速模式");
     expect(body.content).toEqual([{ type: "text", text: "pong" }]);
     expect(body.stop_reason).toBe("end_turn");
     expect(body.usage.input_tokens).toBeGreaterThan(0);
@@ -317,5 +323,47 @@ describe("GatewayStore API key lifecycle", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("GET /v1/models — the catalog the account can reach", () => {
+  test("lists the site's own names, provider-qualified, with freshness", async () => {
+    const { port } = await startServer();
+    await connectFakeBridge(`ws://127.0.0.1:${port}/bridge`, DEEPSEEK_PROVIDER, "pong");
+    const res = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers: { "x-api-key": GATEWAY_KEY },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { id: string; fresh: boolean; effort: string[] }[] };
+    expect(body.data.map((m) => m.id)).toEqual(["deepseek/快速模式", "deepseek/专家模式"]);
+    expect(body.data[0]!.effort).toEqual(["深度思考"]);
+    expect(body.data[0]!.fresh).toBe(true);
+  });
+
+  test("requires the Gateway API Key", async () => {
+    const { port } = await startServer();
+    const res = await fetch(`http://127.0.0.1:${port}/v1/models`);
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("model selection is fail-closed on the wire", () => {
+  test("a qualified model the site does not offer is refused, naming what is", async () => {
+    const { port } = await startServer();
+    await connectFakeBridge(`ws://127.0.0.1:${port}/bridge`, DEEPSEEK_PROVIDER, "pong");
+    const res = await postMessages(port, claudeCodeRequest({ model: "deepseek/deepseek-reasoner" }));
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("deepseek/快速模式");
+  });
+
+  test("an unqualified client model is served and the header says what ran", async () => {
+    // Claude Code sends its own model names, which express no web-model choice;
+    // refusing them would break every unqualified client for no honesty gained.
+    const { port } = await startServer();
+    await connectFakeBridge(`ws://127.0.0.1:${port}/bridge`, DEEPSEEK_PROVIDER, "pong");
+    const res = await postMessages(port, claudeCodeRequest({ model: "claude-sonnet-4-5" }));
+    expect(res.status).toBe(200);
+    expect(decodeURIComponent(res.headers.get("x-gateway-model") ?? "")).toBe("快速模式");
   });
 });

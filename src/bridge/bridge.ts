@@ -20,7 +20,7 @@ import { join } from "node:path";
 
 import { BRIDGE_PROTOCOL_VERSION } from "../shared/bridge-protocol";
 import type { ProviderRegistration } from "../shared/canonical";
-import { createDeepSeekAssembler, DEEPSEEK } from "./deepseek-adapter";
+import { createDeepSeekAssembler, DEEPSEEK, readFrameProvenance } from "./deepseek-adapter";
 
 declare const unsafeWindow: Window | undefined;
 declare const GM_getValue: ((key: string, fallback?: string) => string) | undefined;
@@ -344,6 +344,7 @@ function keepBadgeAttached() {
         document.body.appendChild(badgeEl);
         log('status badge re-attached');
       }
+      announceCatalogIfChanged();
     } catch (e) {
       log('badge keeper failed', e);
     }
@@ -374,6 +375,138 @@ function setStatus(state, detail) {
     '\\n' + CONFIG.daemonUrl +
     (state === 'unpaired' || state === 'rejected' ? '\\n\\nClick to pair.' : '\\n\\nClick to collapse.');
   renderBadge();
+}
+
+const CATALOG_KEY = 'modelCatalog';
+
+/**
+ * Read the model catalog off the page.
+ *
+ * The mode radios only exist on the new-chat screen, so this returns null
+ * inside a conversation. Callers fall back to the last observation rather than
+ * claiming the account has no models -- but the observation timestamp travels
+ * with it so the daemon can say how old it is.
+ */
+function readModeCatalog() {
+  try {
+    const radios = Array.from(document.querySelectorAll(${JSON.stringify(DEEPSEEK.modeRadioSelector)}));
+    const models = [];
+    let selected;
+    for (const el of radios) {
+      const name = (el.innerText || '').trim();
+      if (!name) continue;
+      models.push(name);
+      if ((el.className || '').toString().indexOf(${JSON.stringify(DEEPSEEK.modeSelectedClass)}) !== -1) {
+        selected = name;
+      }
+    }
+    if (models.length === 0) return null;
+    return { models, selected, observedAt: Date.now() };
+  } catch (e) {
+    log('could not read the model catalog', e);
+    return null;
+  }
+}
+
+function rememberCatalog(catalog) {
+  try {
+    if (typeof GM_setValue === 'function') GM_setValue(CATALOG_KEY, JSON.stringify(catalog));
+  } catch (e) {}
+}
+
+function recallCatalog() {
+  try {
+    const raw = typeof GM_getValue === 'function' ? GM_getValue(CATALOG_KEY, '') : '';
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Freshly observed if the page allows it, otherwise the last thing we saw. */
+function currentCatalog() {
+  const fresh = readModeCatalog();
+  if (fresh) {
+    rememberCatalog(fresh);
+    return fresh;
+  }
+  return recallCatalog();
+}
+
+let lastAnnouncedCatalog = '';
+
+function announceCatalogIfChanged() {
+  const fresh = readModeCatalog();
+  if (!fresh) return;
+  rememberCatalog(fresh);
+  const key = fresh.models.join('|') + '#' + (fresh.selected || '');
+  if (key === lastAnnouncedCatalog) return;
+  lastAnnouncedCatalog = key;
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({
+    type: 'bridge.catalog',
+    provider: PROVIDER,
+    models: fresh.models.map(function (name) {
+      return { id: name, displayName: name, effort: [${JSON.stringify(DEEPSEEK.effortToggleLabel)}] };
+    }),
+    selectedModel: fresh.selected,
+    observedAt: fresh.observedAt
+  }));
+  log('announced catalog: ' + fresh.models.join(', '));
+}
+
+/**
+ * Make the page use the requested mode before the prompt is submitted.
+ *
+ * Clicking a mode radio is asynchronous -- verified live, the selected class
+ * has not moved yet on the next statement and lands about a second later -- so
+ * this waits for the selection to actually take rather than assuming the click
+ * worked. Submitting in between would run the turn on the previous mode while
+ * reporting the requested one, which is the substitution ADR-0013 forbids.
+ */
+function ensureModelSelected(wanted, done) {
+  if (!wanted) { done(true); return; }
+  const radios = Array.from(document.querySelectorAll(${JSON.stringify(DEEPSEEK.modeRadioSelector)}));
+  const selectedNow = function () {
+    for (const el of radios) {
+      if ((el.className || '').toString().indexOf(${JSON.stringify(DEEPSEEK.modeSelectedClass)}) !== -1) {
+        return (el.innerText || '').trim();
+      }
+    }
+    return undefined;
+  };
+
+  if (radios.length === 0) {
+    // The mode radios only exist on the new-chat screen. Inside a conversation
+    // the model is fixed for its lifetime, so this cannot be honoured here.
+    const catalog = recallCatalog();
+    const running = catalog && catalog.selected ? catalog.selected : 'unknown';
+    if (running === wanted) { done(true); return; }
+    done(false, 'this conversation is running "' + running + '" and DeepSeek fixes the model when a conversation is created; start a new conversation to use "' + wanted + '"');
+    return;
+  }
+
+  if (selectedNow() === wanted) { done(true); return; }
+  const target = radios.find(function (el) { return (el.innerText || '').trim() === wanted; });
+  if (!target) {
+    done(false, 'the page offers no mode called "' + wanted + '"');
+    return;
+  }
+  target.click();
+
+  const deadline = Date.now() + 5000;
+  const check = setInterval(function () {
+    if (selectedNow() === wanted) {
+      clearInterval(check);
+      rememberCatalog({ models: radios.map(function (el) { return (el.innerText || '').trim(); }), selected: wanted, observedAt: Date.now() });
+      done(true);
+      return;
+    }
+    if (Date.now() > deadline) {
+      clearInterval(check);
+      done(false, 'clicked "' + wanted + '" but the page did not switch to it');
+    }
+  }, 150);
 }
 
 function registerMenu() {
@@ -435,14 +568,21 @@ function connect() {
 }
 
 function registration() {
+  // The catalog is whatever the site shows this account, never a compiled-in
+  // list: the previous hardcoded deepseek-chat/deepseek-reasoner entries were
+  // API names that appear nowhere in the web product.
+  const catalog = currentCatalog();
+  const models = (catalog && catalog.models ? catalog.models : []).map(function (name) {
+    return { id: name, displayName: name, effort: [${JSON.stringify(DEEPSEEK.effortToggleLabel)}] };
+  });
   return {
     provider: PROVIDER,
     protocolVersion: ${BRIDGE_PROTOCOL_VERSION},
     bridgeVersion: BRIDGE_VERSION,
-    models: [
-      { id: 'deepseek-chat', displayName: 'DeepSeek Chat' },
-      { id: 'deepseek-reasoner', displayName: 'DeepSeek Reasoner' }
-    ],
+    modelSwitching: 'at-conversation-start',
+    catalogObservedAt: catalog ? catalog.observedAt : undefined,
+    selectedModel: catalog ? catalog.selected : undefined,
+    models: models,
     capabilities: {
       streaming: true,
       streamSource: 'network',
@@ -500,7 +640,7 @@ function handleMessage(msg) {
 }
 
 function executeTurn(msg) {
-  const { turnId, provider, prompt, conversationRef } = msg;
+  const { turnId, provider, prompt, conversationRef, model } = msg;
   if (provider !== PROVIDER) {
     ws.send(JSON.stringify({ type: 'turn.reject', turnId, provider, reason: 'unknown provider: ' + provider }));
     return;
@@ -530,6 +670,8 @@ function executeTurn(msg) {
   // them apart without needing the browser console.
   const diagnostics = { rawFrames: 0, answerChars: 0, requestUrls: [], composerFound: false, sendButtonFound: false };
   const assembler = createDeepSeekAssembler();
+  const provenance = {};
+  let modelError;
 
   const sendDelta = function (kind, text) {
     if (!text) return;
@@ -548,6 +690,7 @@ function executeTurn(msg) {
       return;
     }
     diagnostics.rawFrames++;
+    readFrameProvenance(payload, provenance);
     const delta = assembler.push(payload);
     if (delta.reasoning) sendDelta('reasoning', delta.reasoning);
     if (delta.answer) sendDelta('text', delta.answer);
@@ -580,7 +723,9 @@ function executeTurn(msg) {
       // reporting it as text would let a broken selector look like a model
       // that simply said nothing.
       let error;
-      if (cancelled) {
+      if (modelError) {
+        error = modelError;
+      } else if (cancelled) {
         // A cancelled turn is an outcome, not a failure: the partial answer is
         // returned as-is and no diagnostic error is synthesised.
       } else if (!diagnostics.composerFound) {
@@ -611,6 +756,7 @@ function executeTurn(msg) {
         reasoning: reasoning || undefined,
         streamSource: 'network',
         cancelled: cancelled || undefined,
+        provenance: provenance,
         error,
         toolCalls,
         envelopeError,
@@ -627,7 +773,17 @@ function executeTurn(msg) {
   inFlightTurns[turnId] = finish;
   timer = setInterval(poll, 400);
 
-  submitPrompt(prompt, diagnostics);
+  // Selection first: a turn must never run on a different model than the one
+  // it was asked for, so a mode that cannot be set ends the turn instead.
+  ensureModelSelected(model, function (ok, reason) {
+    if (!ok) {
+      modelError = { code: 'model_switch_unavailable', message: reason };
+      finish({ cancelled: false });
+      return;
+    }
+    diagnostics.model = model || undefined;
+    submitPrompt(prompt, diagnostics);
+  });
 }
 
 function submitPrompt(prompt, diagnostics) {

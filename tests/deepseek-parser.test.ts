@@ -188,3 +188,48 @@ describe("extractToolEnvelopes", () => {
     expect(out.envelopeError).toContain("unclosed");
   });
 });
+
+// Ticket 06: the stream reports what actually served the turn, so a selection
+// can be verified rather than assumed.
+import { readFrameProvenance, type DeepSeekProvenance } from "../src/bridge/deepseek-adapter";
+
+describe("readFrameProvenance", () => {
+  function foldAll(frames: unknown[]): DeepSeekProvenance {
+    const acc: DeepSeekProvenance = {};
+    for (const f of frames) readFrameProvenance(f, acc);
+    return acc;
+  }
+
+  test("recovers what the recorded turn actually ran with", () => {
+    expect(foldAll(fixture.frames)).toEqual({
+      modelType: "default",
+      conversationMode: "DEFAULT",
+      thinkingEnabled: true,
+      searchEnabled: true,
+    });
+  });
+
+  test("reads model_type from the header frame", () => {
+    const acc: DeepSeekProvenance = {};
+    readFrameProvenance({ request_message_id: 3, response_message_id: 4, model_type: "x" }, acc);
+    expect(acc.modelType).toBe("x");
+  });
+
+  test("reads the toggles from the first response snapshot", () => {
+    const acc: DeepSeekProvenance = {};
+    readFrameProvenance(
+      { v: { response: { thinking_enabled: false, search_enabled: true, conversation_mode: "M" } } },
+      acc,
+    );
+    expect(acc).toEqual({ thinkingEnabled: false, searchEnabled: true, conversationMode: "M" });
+  });
+
+  test("leaves the accumulator alone for frames that carry no provenance", () => {
+    // Content frames vastly outnumber provenance frames; they must not clear it.
+    const acc: DeepSeekProvenance = { modelType: "default", thinkingEnabled: true };
+    for (const junk of [null, 42, "text", { v: "好" }, { p: "response/status", v: "FINISHED" }]) {
+      readFrameProvenance(junk, acc);
+    }
+    expect(acc).toEqual({ modelType: "default", thinkingEnabled: true });
+  });
+});

@@ -21,7 +21,13 @@ function registration(): ProviderRegistration {
   return {
     provider: DEEPSEEK_PROVIDER,
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
-    models: [{ id: "deepseek-chat", displayName: "DeepSeek Chat" }],
+    models: [
+      { id: "快速模式", displayName: "快速模式", effort: ["深度思考"] },
+      { id: "专家模式", displayName: "专家模式", effort: ["深度思考"] },
+    ],
+    modelSwitching: "at-conversation-start" as const,
+    catalogObservedAt: Date.now(),
+    selectedModel: "快速模式",
     capabilities: {
       streaming: true,
       streamSource: "network",
@@ -113,7 +119,7 @@ function postStream(port: number, body: Record<string, unknown> = {}) {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${GATEWAY_KEY}` },
     body: JSON.stringify({
-      model: "deepseek/deepseek-chat",
+      model: "deepseek/快速模式",
       stream: true,
       messages: [{ role: "user", content: "say hi" }],
       ...body,
@@ -250,7 +256,7 @@ describe("real incremental streaming", () => {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${GATEWAY_KEY}` },
       body: JSON.stringify({
-        model: "deepseek/deepseek-chat",
+        model: "deepseek/快速模式",
         messages: [{ role: "user", content: "say hi" }],
       }),
     });

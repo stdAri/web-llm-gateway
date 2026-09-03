@@ -44,6 +44,12 @@ export type CanonicalErrorCode =
   | "provider_unavailable"
   | "provider_busy"
   | "model_unavailable"
+  /** The Bridge has never been able to read the site's model picker. */
+  | "catalog_unavailable"
+  /** The site fixes the model for the life of a conversation (ADR-0013). */
+  | "model_switch_unavailable"
+  /** The site served the turn with a different effort than was selected. */
+  | "effort_not_honoured"
   | "tab_lost"
   | "adapter_drift"
   | "turn_timeout"
@@ -90,6 +96,28 @@ export interface CatalogModel {
 }
 
 /**
+ * When a Web Product lets the model be changed, which differs enough between
+ * sites that one strategy cannot cover them.
+ *
+ * Verified on chat.deepseek.com: the mode radios (快速模式 / 专家模式 /
+ * 识图模式) exist only on the new-chat screen and are gone once a conversation
+ * has started, so a model change there means a new conversation. Doubao
+ * exposes its model picker inside the conversation instead.
+ *
+ * The distinction is load-bearing rather than cosmetic: under
+ * `at-conversation-start`, honouring a model change on a tool-result
+ * continuation is impossible without abandoning the conversation the tool
+ * results belong to, so it has to fail rather than silently switch (ADR-0013).
+ */
+export type ModelSwitching =
+  /** The site offers no model choice. */
+  | "none"
+  /** Fixed when the conversation is created (DeepSeek). */
+  | "at-conversation-start"
+  /** Changeable at any point in an existing conversation (Doubao). */
+  | "mid-conversation";
+
+/**
  * Provider identity announced by the Bridge at registration. Providers are
  * data declared by the Bridge, never a compiled-in daemon enum (ADR-0014).
  */
@@ -101,6 +129,19 @@ export interface ProviderRegistration {
    * the browser right now", which is otherwise unobservable from the daemon. */
   bridgeVersion?: string;
   models: CatalogModel[];
+  /** How this site permits model changes; absent means the Bridge predates
+   * catalog discovery and the daemon must not assume it can switch. */
+  modelSwitching?: ModelSwitching;
+  /**
+   * When the Bridge last read the catalog off the page, as epoch ms.
+   *
+   * Not decoration: DeepSeek's mode radios only exist on the new-chat screen,
+   * so a Bridge sitting in a conversation is reporting what it saw earlier.
+   * The daemon marks that stale rather than presenting it as current.
+   */
+  catalogObservedAt?: number;
+  /** The model the Bridge observed as selected when it last read the catalog. */
+  selectedModel?: string;
   capabilities: ProviderCapabilities;
 }
 

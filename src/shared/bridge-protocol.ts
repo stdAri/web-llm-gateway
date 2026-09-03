@@ -4,7 +4,7 @@
  * Providers are data the Bridge declares at registration.
  */
 
-import type { ProviderRegistration } from "./canonical";
+import type { CatalogModel, ProviderRegistration } from "./canonical";
 
 export type BridgeProtocolVersion = 1;
 
@@ -77,6 +77,9 @@ export type BridgeMessage =
       /** Set when the turn ended because it was cancelled rather than finished.
        * Distinct from `error`: a cancelled turn is an outcome, not a failure. */
       cancelled?: boolean;
+      /** What the Web Product itself reported as serving this turn, used to
+       * verify the selection was honoured rather than assumed. */
+      provenance?: Record<string, unknown>;
       error?: { code: string; message: string };
       /** Tool envelopes extracted from the answer, per ADR-0012: parsed in the
        * page, but never trusted — the daemon revalidates every call. */
@@ -93,6 +96,17 @@ export type BridgeMessage =
       diagnostics?: Record<string, unknown>;
     }
   | {
+      /** Bridge -> daemon: the catalog became observable (the tab reached the
+       * new-chat screen) and may differ from what was reported at registration.
+       * Without this the daemon's catalog can only ever be as fresh as the last
+       * reconnect. */
+      type: "bridge.catalog";
+      provider: string;
+      models: CatalogModel[];
+      selectedModel?: string;
+      observedAt: number;
+    }
+  | {
       /** Daemon -> Bridge: stop generating this turn in the Web Product. The
        * Bridge answers with a `turn.result` carrying `cancelled` and whatever
        * partial text it had assembled. */
@@ -105,6 +119,8 @@ export type BridgeMessage =
       turnId: string;
       provider: string;
       prompt: string;
+      /** The site's own model name to run this turn with. The Bridge selects it
+       * on the page before submitting, or refuses the turn if it cannot. */
       model?: string;
       /** Daemon-issued conversation handle. Present = continue that web
        * conversation; absent = start a fresh one. */
